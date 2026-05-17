@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Batch Review - Low Confidence Reactions</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="brand"><span class="logo"></span><div><h1>Batch Review</h1><div class="small">Low-confidence reactions</div></div></div>
+      <div><a href="/" class="btn secondary">Back</a></div>
+    </div>
+
+    <div class="card">
+      <h2>Low-confidence reactions</h2>
+      {% for r in reactions %}
+        <div class="reaction" style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div><strong>{{ r['reaction_id'] }}</strong> <span class="small">({{ r['patent_id'] }})</span></div>
+            <div class="small">Product: {{ r['product_smiles'] or 'N/A' }} • Confidence: {{ r['confidence'] or 'N/A' }}</div>
+          </div>
+          <div>
+            <button class="btn" onclick="openBatchEdit('{{ r['reaction_id'] }}','{{ r['patent_id'] }}','{{ r['product_smiles'] or '' }}')">Edit</button>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+
+  </div>
+
+  <div id="batch-modal" class="modal-backdrop">
+    <div class="modal">
+      <h3>Edit Correction</h3>
+      <input type="hidden" id="batch-reaction-id">
+      <input type="hidden" id="batch-patent-id">
+      <div class="form-row"><label>Field<select id="batch-field"><option value="product_smiles">product_smiles</option><option value="notes">notes</option></select></label></div>
+      <div class="form-row"><label>Old Value<textarea id="batch-old" rows="2"></textarea></label></div>
+      <div class="form-row"><label>New Value<textarea id="batch-new" rows="2"></textarea></label></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button id="batch-close" class="btn secondary">Close</button><button id="batch-save" class="btn">Save Correction</button></div>
+    </div>
+  </div>
+</body>
+</html>

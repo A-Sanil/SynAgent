@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Patent {{ patent['patent_id'] }}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="container">
+  <div class="header">
+    <div class="brand"><span class="logo"></span><div><h1>{{ patent['title'] }}</h1><div class="small">{{ patent['patent_id'] }}</div></div></div>
+    <div>
+      <a href="/" class="btn secondary">Back</a>
+    </div>
+  </div>
+  <p><strong>Patent ID:</strong> {{ patent['patent_id'] }}</p>
+  <p class="small"><strong>Source URL:</strong> <a href="{{ patent['source_url'] }}">{{ patent['source_url'] }}</a></p>
+  <form method="post" action="/patent/{{ patent['patent_id'] }}/update" class="card">
+    <label>Title: <input name="title" value="{{ patent['title'] }}"></label>
+    <label>Abstract:<br>
+      <textarea name="abstract" rows="6">{{ patent['abstract'] or '' }}</textarea>
+    </label>
+    <div style="display:flex;gap:8px;margin-top:8px"><button class="btn">Save</button><button class="btn secondary" formaction="/patent/{{ patent['patent_id'] }}/approve">Mark Reviewed</button></div>
+  </form>
+
+  <form method="post" action="/patent/{{ patent['patent_id'] }}/approve">
+    <button type="submit">Mark Reviewed</button>
+  </form>
+
+  <h2>Reactions</h2>
+  <div class="card">
+  <h2>Reactions</h2>
+  {% for r in reactions %}
+    <div class="reaction">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <strong>{{ r['reaction_id'] }}</strong>
+          <div class="small">Product: {{ r['product_smiles'] or 'N/A' }} • Yield: {{ r['yield_percent'] or 'N/A' }}</div>
+        </div>
+        <div>
+          <button class="btn" data-open-modal='{{ {"patent_id": patent["patent_id"], "reaction_id": r["reaction_id"], "product_smiles": r["product_smiles"], "yield_percent": r["yield_percent"], "notes": r["notes"]}|tojson }}'>Edit</button>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+
+  <h3>Raw text (truncated)</h3>
+  <pre>{{ patent['raw_text'][:2000] }}</pre>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal-backdrop" class="modal-backdrop">
+    <div class="modal">
+      <h3 class="muted">Edit Reaction</h3>
+      <input type="hidden" id="modal-patent-id">
+      <input type="hidden" id="modal-reaction-id">
+      <div class="form-row"><label>Product SMILES<input id="modal-product"></label></div>
+      <div class="form-row"><label>Yield (%)<input id="modal-yield"></label></div>
+      <div class="form-row"><label>Notes<textarea id="modal-notes" rows="4"></textarea></label></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button id="modal-close" class="btn secondary">Close</button><button id="modal-save" class="btn">Save</button></div>
+    </div>
+  </div>
+</body>
+</html>

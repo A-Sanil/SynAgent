@@ -1,0 +1,28 @@
+[project]
+name = "patent-ingestion-pipeline"
+version = "0.1.0"
+description = "Separate patent ingestion pipeline for collecting raw patent pages, parsing them locally, and building a searchable synthesis database"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.24.0",
+    "scrapling>=0.4.8",
+    "typer>=0.10.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.2.1",
+]
+
+[project.scripts]
+patent-pipeline = "patent_pipeline.cli:app"
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM", "RUF"]
+ignore = ["E501", "B008"]
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
