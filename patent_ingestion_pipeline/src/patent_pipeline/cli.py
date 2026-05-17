@@ -10,6 +10,10 @@ from .database import PatentDatabase
 from .llm_parser import QwenLLMParser
 from .pipeline import IngestionPipeline, QwenParserStub
 import uvicorn
+from dotenv import load_dotenv
+
+# load .env so CLI commands pick up PATENT_LLM_* and PATENT_UI_*
+load_dotenv()
 
 from .webui import app as webui_app
 

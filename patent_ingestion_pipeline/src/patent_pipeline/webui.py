@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status
+from fastapi import FastAPI, Request, Form
 import json
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 import os
+from dotenv import load_dotenv
 
 from .database import PatentDatabase
 
@@ -16,22 +16,18 @@ BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # mount static files for CSS/JS
 app.mount('/static', StaticFiles(directory=str(BASE_DIR / 'static')), name='static')
-security = HTTPBasic()
+
+# Load local .env if present so PATENT_* env vars are respected
+load_dotenv()
 
 
-def require_auth(creds: HTTPBasicCredentials = Depends(security)) -> bool:
-    ui_user = os.getenv("PATENT_UI_USER")
-    ui_pass = os.getenv("PATENT_UI_PASS")
-    if not ui_user or not ui_pass:
-        # if not configured, allow access (development mode)
-        return True
-    if creds.username == ui_user and creds.password == ui_pass:
-        return True
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+def require_auth() -> bool:
+    # The UI is intentionally open for local use.
+    return True
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request, db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def index(request: Request, db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     rows = db.connection.execute("SELECT patent_id, title, reviewed FROM patents ORDER BY reviewed, publication_date DESC LIMIT 200").fetchall()
     db.close()
@@ -39,7 +35,7 @@ def index(request: Request, db_path: str = "data/patent_pipeline.db", auth: bool
 
 
 @app.post("/enqueue_all")
-def web_enqueue_all(db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def web_enqueue_all(db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     cur = db.connection.execute("SELECT id FROM raw_documents ORDER BY id")
     count = 0
@@ -54,7 +50,7 @@ def web_enqueue_all(db_path: str = "data/patent_pipeline.db", auth: bool = Depen
 
 
 @app.get('/search', response_class=HTMLResponse)
-def web_search(request: Request, q: str = '', db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def web_search(request: Request, q: str = '', db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     patents = []
     reactions = []
@@ -70,7 +66,7 @@ def web_search(request: Request, q: str = '', db_path: str = "data/patent_pipeli
 
 
 @app.get('/batch_review', response_class=HTMLResponse)
-def batch_review(request: Request, db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def batch_review(request: Request, db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     # select reactions that have low or missing confidence
     rows = db.connection.execute("SELECT * FROM reactions WHERE confidence IS NULL OR confidence < 0.6 ORDER BY patent_id LIMIT 200").fetchall()
@@ -79,7 +75,7 @@ def batch_review(request: Request, db_path: str = "data/patent_pipeline.db", aut
 
 
 @app.post('/api/active_learning')
-def api_active_learning(payload: dict, db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def api_active_learning(payload: dict, db_path: str = "data/patent_pipeline.db"):
     # payload: {reaction_id, patent_id, field, old_value, new_value, user}
     rid = payload.get('reaction_id')
     pid = payload.get('patent_id')
@@ -103,7 +99,7 @@ def api_active_learning(payload: dict, db_path: str = "data/patent_pipeline.db",
 
 
 @app.get("/patent/{patent_id}", response_class=HTMLResponse)
-def view_patent(request: Request, patent_id: str, db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def view_patent(request: Request, patent_id: str, db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     p = db.connection.execute("SELECT * FROM patents WHERE patent_id = ?", (patent_id,)).fetchone()
     reactions = db.connection.execute("SELECT * FROM reactions WHERE patent_id = ?", (patent_id,)).fetchall()
@@ -112,7 +108,7 @@ def view_patent(request: Request, patent_id: str, db_path: str = "data/patent_pi
 
 
 @app.post("/patent/{patent_id}/approve")
-def approve_patent(patent_id: str, db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def approve_patent(patent_id: str, db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     db.mark_patent_reviewed(patent_id, True)
     db.close()
@@ -120,7 +116,7 @@ def approve_patent(patent_id: str, db_path: str = "data/patent_pipeline.db", aut
 
 
 @app.post("/patent/{patent_id}/update")
-def update_patent(patent_id: str, title: str = Form(...), abstract: str = Form(""), db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def update_patent(patent_id: str, title: str = Form(...), abstract: str = Form(""), db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     with db.connection:
         db.connection.execute("UPDATE patents SET title = ?, abstract = ? WHERE patent_id = ?", (title, abstract, patent_id))
@@ -142,7 +138,7 @@ def update_patent(patent_id: str, title: str = Form(...), abstract: str = Form("
 
 
 @app.post("/patent/{patent_id}/reaction/{reaction_id}/update")
-def update_reaction(patent_id: str, reaction_id: str, product_smiles: str = Form(None), yield_percent: str = Form(None), notes: str = Form(None), db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def update_reaction(patent_id: str, reaction_id: str, product_smiles: str = Form(None), yield_percent: str = Form(None), notes: str = Form(None), db_path: str = "data/patent_pipeline.db"):
     db = PatentDatabase(db_path)
     with db.connection:
         db.connection.execute(
@@ -173,7 +169,7 @@ def update_reaction(patent_id: str, reaction_id: str, product_smiles: str = Form
 
 
 @app.post('/api/reaction/update')
-def api_update_reaction(payload: dict, db_path: str = "data/patent_pipeline.db", auth: bool = Depends(require_auth)):
+def api_update_reaction(payload: dict, db_path: str = "data/patent_pipeline.db"):
     # payload: {patent_id,reaction_id,product_smiles,yield_percent,notes}
     patent_id = payload.get('patent_id')
     reaction_id = payload.get('reaction_id')

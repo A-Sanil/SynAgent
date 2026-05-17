@@ -1,0 +1,21 @@
+{
+  "patent_id": "US-TEST-0001",
+  "title": "Test Patent",
+  "abstract": "This is a test patent for unit testing.",
+  "source_url": "https://example.com/patent/1",
+  "publication_date": "2026-05-17",
+  "metadata": {
+    "source": "test"
+  },
+  "reactions": [
+    {
+      "product_smiles": "CCO",
+      "reactant_smiles": "CC",
+      "yield_percent": 72.5,
+      "temperature_celsius": 80,
+      "metadata": {
+        "confidence": 0.75
+      }
+    }
+  ]
+}

@@ -24,7 +24,7 @@ Your job is to:
 
 Use the provided hazard scoring functions directly.""".strip()
 
-agent = Agent(
+agent = Agent(=
     model,
     output_type=str,
     system_prompt=OPTIMIZER_PROMPT,

@@ -13,6 +13,9 @@ from datetime import datetime
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .models import PatentRecord, RawDocument, ReactionRecord
 
