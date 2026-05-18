@@ -341,5 +341,87 @@ def run_full_pipeline(
     typer.echo(f"Collected and parsed {len(records)} patent records from {len(urls)} URLs")
 
 
+@app.command("download-bulk")
+def download_bulk(
+    year: int = typer.Argument(2024, help="USPTO grant year"),
+    week: int = typer.Argument(1, help="ISO week number (1–53)"),
+    limit: int = typer.Option(500, help="Max patents to download"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="CSV output path (default: patents_YYYY_wWW.csv)"),
+    chemistry_only: bool = typer.Option(True, "--chemistry/--all", help="Filter to CPC section C (Chemistry)"),
+) -> None:
+    """Download weekly bulk patent metadata from PatentsView as a CSV."""
+    from .bulk_downloader import get_bulk_patent_data
+
+    out_path = output or Path(f"patents_{year}_w{week:02d}.csv")
+    typer.echo(f"Downloading year={year} week={week} (chemistry_only={chemistry_only}, limit={limit}) …")
+    records = get_bulk_patent_data(year=year, week=week, limit=limit, output_csv=out_path, chemistry_only=chemistry_only)
+    typer.echo(f"Downloaded {len(records)} patents → {out_path}")
+
+
+@app.command("ingest-csv")
+def ingest_csv_cmd(
+    csv_file: Path = typer.Argument(..., help="CSV file to ingest (patent_id, title, abstract, raw_text, url columns)"),
+    db_path: Optional[Path] = typer.Option(None, "--db"),
+    data_dir: Optional[Path] = typer.Option(None, "--data-dir"),
+    no_enqueue: bool = typer.Option(False, "--no-enqueue", help="Store documents without queuing for parsing"),
+    skip_existing: bool = typer.Option(True, "--skip-existing/--allow-duplicates"),
+) -> None:
+    """Ingest a bulk patent CSV into the database and queue rows for LLM parsing.
+
+    Compatible with CSVs produced by 'download-bulk' or any CSV with columns:
+    patent_id, title, abstract, raw_text (and optionally: date, url).
+
+    After ingesting, run 'run-worker' to parse the queued documents with Gemini.
+    """
+    from .csv_ingestion import ingest_csv_file
+
+    if not csv_file.exists():
+        typer.echo(f"File not found: {csv_file}", err=True)
+        raise typer.Exit(code=1)
+
+    db = _open_db(db_path, data_dir)
+    n = ingest_csv_file(csv_file, db, enqueue=not no_enqueue, skip_existing=skip_existing, verbose=True)
+    db.close()
+    typer.echo(f"Ingested {n} documents from {csv_file}")
+    if not no_enqueue:
+        typer.echo("Run 'run-worker' to parse the queued documents with Gemini.")
+
+
+@app.command("ingest-ord")
+def ingest_ord_cmd(
+    limit: int = typer.Option(5000, help="Max reactions to import"),
+    n_files: int = typer.Option(10, help="Number of ORD .pb.gz files to download/process"),
+    pb_dir: Path = typer.Option(Path("ord_data"), "--pb-dir", help="Directory for .pb.gz files"),
+    db_path: Optional[Path] = typer.Option(None, "--db"),
+    data_dir: Optional[Path] = typer.Option(None, "--data-dir"),
+    no_download: bool = typer.Option(False, "--no-download", help="Skip downloading; use existing files in --pb-dir"),
+) -> None:
+    """Import reactions from the Open Reaction Database (ORD) via GitHub LFS.
+
+    Downloads .pb.gz files from the ORD GitHub repository and inserts reactions
+    directly — no LLM needed (data is expert-curated).
+
+    Requires: pip install ord-schema
+    """
+    from .ord_pb_ingestion import ingest_ord_pb_files
+
+    db = _open_db(db_path, data_dir)
+    try:
+        n = ingest_ord_pb_files(
+            db,
+            pb_dir=pb_dir,
+            n_files=n_files,
+            limit=limit,
+            download=not no_download,
+            verbose=True,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        db.close()
+        raise typer.Exit(code=1)
+    db.close()
+    typer.echo(f"ORD import complete: {n} reactions added.")
+
+
 if __name__ == "__main__":
     app()

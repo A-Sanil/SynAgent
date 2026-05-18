@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Patent Parser - Upload CSV</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="header card" style="margin-bottom:16px;align-items:center;">
+    <div class="brand"><span class="logo"></span><div><h1>Patent Parser</h1><div class="small">Bulk CSV upload</div></div></div>
+    <div class="controls">
+      <a href="/" class="btn">← Review queue</a>
+    </div>
+  </div>
+
+  <div class="card" style="max-width:640px;margin:0 auto;">
+    <h2>Upload Bulk Patent CSV</h2>
+    <p class="small">
+      Drop a CSV file produced by <code>download-bulk</code> or any file with columns:<br>
+      <code>patent_id, title, abstract, raw_text</code> (plus optional <code>date, url</code>).
+    </p>
+    <p class="small">
+      Each row becomes a <em>RawDocument</em> and is queued for Gemini LLM parsing.
+      Run <strong>Run Worker</strong> from the review queue (or <code>run-worker</code> CLI) after uploading.
+    </p>
+
+    <div id="drop-zone" style="
+      border: 2px dashed #555;
+      border-radius: 8px;
+      padding: 40px 20px;
+      text-align: center;
+      margin: 16px 0;
+      cursor: pointer;
+      transition: border-color .2s;
+    ">
+      <p style="font-size:1.2em;">Drag &amp; drop a <code>.csv</code> file here</p>
+      <p class="small">or</p>
+      <label class="btn" for="csv-input" style="cursor:pointer;">Browse file</label>
+      <input type="file" id="csv-input" accept=".csv" style="display:none;">
+    </div>
+
+    <div id="upload-status" style="display:none;padding:12px;border-radius:6px;margin-top:8px;"></div>
+
+    <div style="margin-top:16px;">
+      <label>
+        <input type="checkbox" id="enqueue-check" checked>
+        Auto-enqueue for LLM parsing
+      </label>
+    </div>
+
+    <button class="btn" id="upload-btn" style="margin-top:16px;display:none;">
+      Upload &amp; Ingest
+    </button>
+  </div>
+
+  <script>
+    const dropZone = document.getElementById('drop-zone');
+    const csvInput = document.getElementById('csv-input');
+    const uploadBtn = document.getElementById('upload-btn');
+    const statusDiv = document.getElementById('upload-status');
+    const enqueueCheck = document.getElementById('enqueue-check');
+    let selectedFile = null;
+
+    function setFile(file) {
+      selectedFile = file;
+      dropZone.style.borderColor = '#4caf50';
+      dropZone.querySelector('p').textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+      uploadBtn.style.display = 'inline-block';
+    }
+
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor = '#90caf9'; });
+    dropZone.addEventListener('dragleave', () => { dropZone.style.borderColor = '#555'; });
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      const f = e.dataTransfer.files[0];
+      if (f && f.name.endsWith('.csv')) { setFile(f); }
+      else { showStatus('Only .csv files are accepted.', false); }
+    });
+    csvInput.addEventListener('change', () => { if (csvInput.files[0]) setFile(csvInput.files[0]); });
+
+    uploadBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = 'Uploading…';
+      showStatus('Uploading and ingesting — this may take a moment for large files…', null);
+
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      fd.append('enqueue', enqueueCheck.checked ? 'true' : 'false');
+
+      try {
+        const resp = await fetch('/api/upload-csv', { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (resp.ok && data.ok) {
+          showStatus(`Ingested ${data.ingested} documents from "${data.filename}".` +
+            (enqueueCheck.checked ? ' Now run the worker to parse them.' : ''), true);
+        } else {
+          showStatus(`Error: ${data.detail || JSON.stringify(data)}`, false);
+        }
+      } catch (err) {
+        showStatus(`Request failed: ${err}`, false);
+      } finally {
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = 'Upload & Ingest';
+      }
+    });
+
+    function showStatus(msg, ok) {
+      statusDiv.style.display = 'block';
+      statusDiv.style.background = ok === true ? '#1b5e20' : ok === false ? '#b71c1c' : '#333';
+      statusDiv.textContent = msg;
+    }
+  </script>
+</body>
+</html>

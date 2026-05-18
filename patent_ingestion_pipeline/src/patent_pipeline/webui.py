@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, Form, HTTPException, Request
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -375,6 +375,47 @@ def api_crawler_status():
         payload["runs"] = [dict(r) for r in runs]
         db.close()
     return JSONResponse(payload)
+
+
+@app.get("/upload-csv", response_class=HTMLResponse)
+def upload_csv_page(request: Request):
+    """Form page for dropping a bulk patent CSV into the pipeline."""
+    return templates.TemplateResponse(request, "upload_csv.html", _ctx())
+
+
+@app.post("/api/upload-csv")
+async def api_upload_csv(
+    file: UploadFile = File(...),
+    enqueue: bool = Form(True),
+):
+    """Accept a patent CSV upload, store each row as a RawDocument, and enqueue for parsing.
+
+    Returns JSON with the number of documents ingested.
+    Compatible CSV columns: patent_id, title, abstract, raw_text, url, date.
+    """
+    from .csv_ingestion import ingest_csv_bytes
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are accepted")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    db = _db()
+    try:
+        n = ingest_csv_bytes(
+            content,
+            filename=file.filename,
+            db=db,
+            enqueue=enqueue,
+            skip_existing=True,
+        )
+    except Exception as exc:
+        db.close()
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}")
+    db.close()
+    return JSONResponse({"ok": True, "ingested": n, "filename": file.filename})
 
 
 @app.get("/api/status")

@@ -166,6 +166,10 @@ class PatentDatabase:
         if "confidence" not in cols:
             with self.connection:
                 self.connection.execute("ALTER TABLE reactions ADD COLUMN confidence REAL DEFAULT 0")
+        if "source" not in cols:
+            # Track where each reaction came from: 'patent' (LLM-extracted) or 'ord' (bulk import)
+            with self.connection:
+                self.connection.execute("ALTER TABLE reactions ADD COLUMN source TEXT DEFAULT 'patent'")
         with self.connection:
             self.connection.execute(
                 """
