@@ -3,7 +3,7 @@
 Handles rate-limit exhaustion by waiting before restarting.
 Usage:
     python run_loop.py
-    PATENT_DATA_DIR=D:\SynAgent python run_loop.py
+    set PATENT_DATA_DIR=D:\\SynAgent && python run_loop.py
 """
 import os
 import sys
@@ -58,7 +58,7 @@ for round_num in range(1, MAX_ROUNDS + 1):
     result = subprocess.run(
         [python, "-u", "drain_queue.py"],
         text=True,
-        timeout=600,
+        timeout=7200,  # 2 hours max per drain run
         env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
 
