@@ -132,9 +132,9 @@ while True:
     if retries >= 4:
         db.update_queue_status(queue_id, "error")
 
-    # heartbeat to keep output stream active (prevents task runner idle timeout)
-    import sys
-    for _ in range(5):
+    # Paced delay between requests — 8s = ~7 RPM, well under 15 RPM free limit
+    # Heartbeat dots keep the task runner from killing idle processes
+    for _ in range(8):
         sys.stdout.write(".")
         sys.stdout.flush()
         time.sleep(1)
