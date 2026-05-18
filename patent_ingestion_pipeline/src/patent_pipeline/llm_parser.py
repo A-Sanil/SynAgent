@@ -1,7 +1,7 @@
-"""Local LLM parser that calls a Savio-hosted vLLM endpoint.
+"""Local LLM parsers for patent chemistry extraction.
 
-Use this on Savio after the Scrapling collection job has stored raw patent pages.
-The parser sends raw text to your Qwen service through an OpenAI-compatible API and expects strict JSON output.
+Use these parsers after the Scrapling collection job has stored raw patent pages.
+The parsers send raw text to either a local OpenAI-compatible endpoint or the Gemini REST API and expect strict JSON output.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ class LLMParserError(RuntimeError):
     """Raised when the parser API returns invalid data."""
 
 
-class QwenLLMParser:
-    """Parser client for a vLLM-served Qwen model."""
+class PatentLLMParser:
+    """Shared helpers for turning parser JSON into patent records."""
 
     def __init__(
         self,
@@ -35,7 +35,7 @@ class QwenLLMParser:
         timeout: float = 180.0,
     ):
         self.base_url = (base_url or os.getenv("PATENT_LLM_BASE_URL", "http://127.0.0.1:8000")).rstrip("/")
-        self.model = model or os.getenv("PATENT_LLM_MODEL", "qwen")
+        self.model = model or os.getenv("PATENT_LLM_MODEL", "gemini-2.0-flash")
         self.api_key = api_key or os.getenv("PATENT_LLM_API_KEY")
         self.timeout = timeout
 
@@ -183,7 +183,12 @@ Raw HTML:
     def _extract_json(self, content: str) -> dict[str, Any]:
         content = content.strip()
         if content.startswith("```"):
-            content = content.strip("`")
+            lines = content.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
         try:
             return json.loads(content)
         except json.JSONDecodeError as exc:
@@ -237,7 +242,141 @@ Raw HTML:
             reactions=reactions,
             metadata={
                 **document.metadata,
-                "parser": "qwen_llm",
+                "parser": "gemini_llm",
                 "parser_model": self.model,
             },
         )
+
+
+class GeminiLLMParser:
+    """Parser client for Google Gemini's REST API.
+
+    Uses GEMINI_API_KEY from the environment unless an explicit key is provided.
+    GEMINI_MODEL defaults to gemini-2.0-flash.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float = 180.0,
+    ):
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        self.timeout = timeout
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY is required for GeminiLLMParser")
+
+    def parse(self, document: RawDocument) -> PatentRecord:
+        payload = self._build_payload(document)
+        response = self._generate_content(payload)
+        data = self._extract_json(response)
+        patent = PatentLLMParser._to_patent_record(self, document, data)
+
+        try:
+            from .chem_ner import verify_smiles
+
+            for r in patent.reactions:
+                ps = r.product_smiles
+                conf = None
+                if ps:
+                    try:
+                        v = verify_smiles(ps)
+                        score = 0.0
+                        if v.get("rdkit_valid"):
+                            score += 0.6
+                        if v.get("pubchem_match"):
+                            score += 0.4
+                        if v.get("canonical") and v.get("rdkit_valid") and not v.get("pubchem_match"):
+                            score = max(score, 0.5)
+                        conf = float(score)
+                        if v.get("canonical"):
+                            r.product_smiles = v.get("canonical")
+                    except Exception:
+                        conf = 0.0
+                else:
+                    conf = 0.0
+                r.metadata["confidence"] = conf
+                if conf < 0.6:
+                    r.metadata["needs_review"] = True
+        except Exception:
+            pass
+
+        patent.metadata = {**patent.metadata, "parser": "gemini_llm", "parser_model": self.model}
+        return patent
+
+    def _build_payload(self, document: RawDocument) -> dict[str, Any]:
+        system_prompt = (
+            "You are a patent chemistry extraction engine. "
+            "Extract exact structured synthesis data from the input. "
+            "Return only valid JSON with no markdown and no extra text. "
+            "If a field is unknown, use null or an empty list. "
+            "Focus on patent identifiers, titles, abstracts, inventors, assignees, "
+            "reaction steps, SMILES, reaction SMARTS, yields, temperatures, solvents, "
+            "catalysts, time, mechanism notes, and domain tags."
+        )
+        user_prompt = f"""
+Extract structured patent chemistry data from this document.
+
+Required JSON shape:
+{{
+  "patent_id": "string",
+  "title": "string",
+  "abstract": "string or null",
+  "source_url": "string or null",
+  "publication_date": "YYYY-MM-DD or null",
+  "inventors": ["string"],
+  "assignee": "string or null",
+  "domain_tags": ["string"],
+  "target_terms": ["string"],
+  "reactions": [
+    {{
+      "reaction_id": "string",
+      "reaction_smarts": "string or null",
+      "reactant_smiles": ["string"],
+      "product_smiles": "string or null",
+      "yield_percent": 0.0,
+      "temperature_celsius": 0.0,
+      "solvent": "string or null",
+      "catalyst": "string or null",
+      "time_hours": 0.0,
+      "mechanism_text": "string or null",
+      "notes": "string or null"
+    }}
+  ]
+}}
+
+Document metadata:
+- source_url: {document.source_url}
+- source_type: {document.source_type}
+- title: {document.title}
+
+Raw text:
+{document.raw_text or ""}
+
+Raw HTML:
+{document.raw_html or ""}
+""".strip()
+        return {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {"temperature": 0},
+        }
+
+    def _generate_content(self, payload: dict[str, Any]) -> str:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:generateContent?key={self.api_key}"
+        )
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+
+        data = response.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMParserError("Unexpected response format from Gemini") from exc
+
+    def _extract_json(self, content: str) -> dict[str, Any]:
+        return PatentLLMParser._extract_json(self, content)

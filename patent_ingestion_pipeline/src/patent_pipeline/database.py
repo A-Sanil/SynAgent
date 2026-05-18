@@ -4,18 +4,30 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict
 from pathlib import Path
 
+from .config import get_db_path, init_storage, resolve_data_dir
 from .models import PatentRecord, RawDocument, ReactionRecord
+from .storage_usb import save_parsed_json, save_raw_document
 
 
 class PatentDatabase:
-    def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None, data_dir: str | Path | None = None):
+        self.data_dir = resolve_data_dir(data_dir)
+        init_storage(self.data_dir)
+        self.db_path = Path(db_path) if db_path is not None else get_db_path(self.data_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.db_path)
+        self.connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
+        self._apply_pragmas()
         self.initialize()
+
+    def _apply_pragmas(self) -> None:
+        with self.connection:
+            self.connection.execute("PRAGMA journal_mode=WAL;")
+            self.connection.execute("PRAGMA synchronous=FULL;")
+            self.connection.execute("PRAGMA foreign_keys=ON;")
 
     def initialize(self) -> None:
         with self.connection:
@@ -54,7 +66,7 @@ class PatentDatabase:
                     reaction_smarts TEXT,
                     reactant_smiles_json TEXT,
                     product_smiles TEXT,
-                    confidence REAL,
+                    confidence REAL DEFAULT 0,
                     yield_percent REAL,
                     temperature_celsius REAL,
                     solvent TEXT,
@@ -129,6 +141,23 @@ class PatentDatabase:
                     );
                     """
                 )
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Apply lightweight schema upgrades for existing databases."""
+        cols = {row[1] for row in self.connection.execute("PRAGMA table_info(reactions)").fetchall()}
+        if "confidence" not in cols:
+            with self.connection:
+                self.connection.execute("ALTER TABLE reactions ADD COLUMN confidence REAL DEFAULT 0")
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE reactions
+                SET confidence = CAST(json_extract(metadata_json, '$.confidence') AS REAL)
+                WHERE (confidence IS NULL OR confidence = 0)
+                  AND json_extract(metadata_json, '$.confidence') IS NOT NULL
+                """
+            )
 
     def add_raw_document(self, document: RawDocument) -> None:
         with self.connection:
@@ -150,6 +179,15 @@ class PatentDatabase:
                     json.dumps(document.metadata),
                 ),
             )
+        try:
+            save_raw_document(
+                document.source_url,
+                document.raw_text,
+                document.raw_html,
+                path=str(self.data_dir),
+            )
+        except OSError:
+            pass
 
     def list_raw_documents(self) -> list[sqlite3.Row]:
         cursor = self.connection.execute(
@@ -210,57 +248,75 @@ class PatentDatabase:
             # Keep database upsert robust even if indexing fails
             pass
 
-    def _insert_reaction(self, reaction: ReactionRecord) -> None:
-        # Insert with optional confidence column if the schema includes it.
-        cols = [
-            'reaction_id', 'patent_id', 'reaction_smarts', 'reactant_smiles_json',
-            'product_smiles', 'yield_percent', 'temperature_celsius', 'solvent',
-            'catalyst', 'time_hours', 'mechanism_text', 'notes', 'metadata_json'
-        ]
-        vals = [
-            reaction.reaction_id,
-            reaction.patent_id,
-            reaction.reaction_smarts,
-            json.dumps(reaction.reactant_smiles),
-            reaction.product_smiles,
-            reaction.yield_percent,
-            reaction.temperature_celsius,
-            reaction.solvent,
-            reaction.catalyst,
-            reaction.time_hours,
-            reaction.mechanism_text,
-            reaction.notes,
-            json.dumps(reaction.metadata),
-        ]
-        # include confidence if present in schema or reaction.metadata
-        include_conf = False
         try:
-            cur = self.connection.execute("PRAGMA table_info(reactions)").fetchall()
-            cols_present = [c[1] for c in cur]
-            if 'confidence' in cols_present:
-                include_conf = True
-        except Exception:
-            include_conf = False
-        if include_conf:
-            cols.insert(-2, 'confidence')
-            vals.insert(-2, reaction.metadata.get('confidence'))
+            save_parsed_json(record.patent_id, self._record_to_export_dict(record), path=str(self.data_dir))
+        except OSError:
+            pass
 
-        placeholders = ','.join(['?'] * len(cols))
-        q = f"INSERT INTO reactions ({', '.join(cols)}) VALUES ({placeholders})"
-        self.connection.execute(q, tuple(vals))
+    def _record_to_export_dict(self, record: PatentRecord) -> dict:
+        reactions = []
+        for reaction in record.reactions:
+            payload = asdict(reaction)
+            payload["confidence"] = reaction.metadata.get("confidence")
+            reactions.append(payload)
+        return {
+            "patent_id": record.patent_id,
+            "title": record.title,
+            "abstract": record.abstract,
+            "source_url": record.source_url,
+            "publication_date": record.publication_date,
+            "inventors": record.inventors,
+            "assignee": record.assignee,
+            "domain_tags": record.domain_tags,
+            "target_terms": record.target_terms,
+            "reactions": reactions,
+            "metadata": record.metadata,
+        }
+
+    def _insert_reaction(self, reaction: ReactionRecord) -> None:
+        confidence = reaction.metadata.get("confidence")
+        if confidence is None:
+            confidence = 0.0
+        self.connection.execute(
+            """
+            INSERT INTO reactions (
+                reaction_id, patent_id, reaction_smarts, reactant_smiles_json,
+                product_smiles, confidence, yield_percent, temperature_celsius,
+                solvent, catalyst, time_hours, mechanism_text, notes, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                reaction.reaction_id,
+                reaction.patent_id,
+                reaction.reaction_smarts,
+                json.dumps(reaction.reactant_smiles),
+                reaction.product_smiles,
+                confidence,
+                reaction.yield_percent,
+                reaction.temperature_celsius,
+                reaction.solvent,
+                reaction.catalyst,
+                reaction.time_hours,
+                reaction.mechanism_text,
+                reaction.notes,
+                json.dumps(reaction.metadata),
+            ),
+        )
+
+    def _replace_fts_row(self, table: str, key_col: str, key_val: str, insert_sql: str, values: tuple) -> None:
+        """Replace a row in FTS or fallback helper tables (FTS5 has no UPSERT)."""
+        self.connection.execute(f"DELETE FROM {table} WHERE {key_col} = ?", (key_val,))
+        self.connection.execute(insert_sql, values)
 
     def _index_patent_fts(self, record: PatentRecord) -> None:
         """Insert or replace a lightweight FTS row for a patent."""
-        self.connection.execute(
-            """
-            INSERT INTO patents_fts (patent_id, title, abstract, raw_text)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(patent_id) DO UPDATE SET
-                title = excluded.title,
-                abstract = excluded.abstract,
-                raw_text = excluded.raw_text
-            """,
-            (record.patent_id, record.title, record.abstract, record.raw_text),
+        values = (record.patent_id, record.title, record.abstract, record.raw_text)
+        self._replace_fts_row(
+            "patents_fts",
+            "patent_id",
+            record.patent_id,
+            "INSERT INTO patents_fts (patent_id, title, abstract, raw_text) VALUES (?, ?, ?, ?)",
+            values,
         )
 
     def _index_reaction_fts(self, reaction: ReactionRecord) -> None:
@@ -273,15 +329,13 @@ class PatentDatabase:
             reaction.mechanism_text or "",
             reaction.notes or "",
         ]))
-        self.connection.execute(
-            """
-            INSERT INTO reactions_fts (reaction_id, patent_id, reaction_text)
-            VALUES (?, ?, ?)
-            ON CONFLICT(reaction_id) DO UPDATE SET
-                patent_id = excluded.patent_id,
-                reaction_text = excluded.reaction_text
-            """,
-            (reaction.reaction_id, reaction.patent_id, combined),
+        values = (reaction.reaction_id, reaction.patent_id, combined)
+        self._replace_fts_row(
+            "reactions_fts",
+            "reaction_id",
+            reaction.reaction_id,
+            "INSERT INTO reactions_fts (reaction_id, patent_id, reaction_text) VALUES (?, ?, ?)",
+            values,
         )
 
     def search_text(self, query: str, limit: int = 50) -> dict[str, list[sqlite3.Row]]:
@@ -368,6 +422,35 @@ class PatentDatabase:
     def mark_patent_reviewed(self, patent_id: str, reviewed: bool = True) -> None:
         with self.connection:
             self.connection.execute("UPDATE patents SET reviewed = ? WHERE patent_id = ?", (1 if reviewed else 0, patent_id))
+
+    def list_low_confidence_reactions(self, threshold: float = 0.6, limit: int = 200) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """
+            SELECT *
+            FROM reactions
+            WHERE confidence IS NULL OR confidence < ?
+            ORDER BY confidence ASC, patent_id
+            LIMIT ?
+            """,
+            (threshold, limit),
+        ).fetchall()
+
+    def update_reaction_field(self, reaction_id: str, field: str, value: str | float | None) -> None:
+        allowed = {
+            "product_smiles",
+            "yield_percent",
+            "notes",
+            "confidence",
+            "solvent",
+            "catalyst",
+        }
+        if field not in allowed:
+            raise ValueError(f"Unsupported reaction field: {field}")
+        with self.connection:
+            self.connection.execute(
+                f"UPDATE reactions SET {field} = ? WHERE reaction_id = ?",
+                (value, reaction_id),
+            )
 
     # ---------------- Optional semantic index (requires sentence-transformers + faiss) ----------------
     def build_semantic_index(self, model_name: str = "all-MiniLM-L6-v2") -> None:

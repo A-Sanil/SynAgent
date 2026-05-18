@@ -1,0 +1,34 @@
+{
+  "patent_id": "US-TEST-0001",
+  "title": "Test Patent",
+  "abstract": "Unit test patent.",
+  "source_url": "https://example.com/patent/1",
+  "publication_date": null,
+  "inventors": [],
+  "assignee": null,
+  "domain_tags": [],
+  "target_terms": [],
+  "reactions": [
+    {
+      "reaction_id": "US-TEST-0001:1",
+      "patent_id": "US-TEST-0001",
+      "reaction_smarts": null,
+      "reactant_smiles": [
+        "CC"
+      ],
+      "product_smiles": "CCO",
+      "yield_percent": 72.5,
+      "temperature_celsius": null,
+      "solvent": null,
+      "catalyst": null,
+      "time_hours": null,
+      "mechanism_text": null,
+      "notes": null,
+      "metadata": {
+        "confidence": 0.75
+      },
+      "confidence": 0.75
+    }
+  ],
+  "metadata": {}
+}

@@ -4,7 +4,7 @@
 
 An automated system that:
 1. **Collects** patent documents from web + PDFs
-2. **Parses** reactions using Qwen LLM (on Savio GPU)
+2. **Parses** reactions using Google Gemini
 3. **Validates** chemistry (SMILES, conditions)
 4. **Scores confidence** (0.0–1.0 per reaction)
 5. **Provides UI** for human review & correction
@@ -25,7 +25,7 @@ python -m patent_pipeline.cli init_db
 python -m uvicorn patent_pipeline.webui:app --host 127.0.0.1 --port 8001 --reload
 
 # Terminal 2: Worker (collects & parses)
-python -m patent_pipeline.cli run_worker --base-url http://127.0.0.1:8000 --model qwen
+python -m patent_pipeline.cli parse --parser gemini
 
 # (Another terminal) Collect patents
 python -m patent_pipeline.cli collect "https://example.com/patent/123"
@@ -39,7 +39,7 @@ python -m patent_pipeline.cli enqueue_all
 ## Architecture in 30 Seconds
 
 ```
-Web/PDFs ──► Scrapling ──► Raw Docs ──► Parse Queue ──► Qwen LLM (Savio)
+Web/PDFs ──► Scrapling ──► Raw Docs ──► Parse Queue ──► Google Gemini API
                                                               │
                                                               ▼
                                                     Chem NER + SMILES Verify
@@ -77,7 +77,7 @@ Web/PDFs ──► Scrapling ──► Raw Docs ──► Parse Queue ──► 
 |-----------|------|
 | **Scrapling** | Web collection + URL fetch |
 | **collector_pdf.py** | PDF download + text/table extraction |
-| **llm_parser.py** | Qwen LLM interface (vLLM endpoint) |
+| **llm_parser.py** | Gemini parser interface |
 | **chem_ner.py** | Chemistry extraction + SMILES validation |
 | **pubchem.py** | PubChem REST API helpers |
 | **database.py** | SQLite persistence, FTS5, queue, active learning |
@@ -95,18 +95,17 @@ Web/PDFs ──► Scrapling ──► Raw Docs ──► Parse Queue ──► 
 ## Configuration (.env)
 
 ```
-PATENT_LLM_BASE_URL=http://127.0.0.1:8000    # Local or SSH tunnel
-PATENT_LLM_MODEL=qwen                        # Model name
-PATENT_LLM_API_KEY=                          # Optional API key
+GEMINI_API_KEY=                               # Google API key
+GEMINI_MODEL=gemini-2.0-flash                 # Gemini model name
+PATENT_LLM_API_KEY=                           # Optional legacy proxy key
 PATENT_UI_DISABLE_AUTH=1                     # Set to allow all access (dev mode)
 ```
 
 ## Deployment on Savio
 
-1. Submit vLLM job: `sbatch ~/run_qwen.slurm`
-2. Open SSH tunnel: `ssh -L 8000:compute_node:8000 user@savio.lbl.gov`
-3. Update `.env` with `PATENT_LLM_BASE_URL=http://127.0.0.1:8000`
-4. Run worker: `python -m patent_pipeline.cli run_worker --base-url http://127.0.0.1:8000`
+1. Set `GEMINI_API_KEY` in `.env`
+2. Optionally set `GEMINI_MODEL=gemini-2.0-flash`
+3. Run parser: `python -m patent_pipeline.cli parse --parser gemini`
 
 ## Next Steps
 

@@ -8,7 +8,7 @@ This project is intentionally separate from SynAgent.
 
 1. Collects raw patent pages and documents with Scrapling.
 2. Preserves the raw HTML/text so extraction can be repeated later.
-3. Sends the raw content to a local parser on the Berkeley Savio cluster, such as Qwen served through vLLM.
+3. Sends the raw content to Google Gemini for structured chemistry extraction.
 4. Normalizes the extracted reactions into a SQLite database for exact lookup and downstream search.
 
 ## Why Scrapling
@@ -29,7 +29,7 @@ For patent work, I would start with `Fetcher` for simple patent pages, escalate 
 Patent URL list
     -> Scrapling collection
     -> Raw HTML / text archive
-    -> Local Qwen parse on Savio
+    -> Gemini parse
     -> Structured JSON records
     -> SQLite search database
 ```
@@ -75,26 +75,26 @@ Then run a second job for parsing:
 #SBATCH --output=logs/%x-%j.out
 
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate qwen-env
+conda activate patent-pipeline
 cd /global/home/$USER/patent_ingestion_pipeline
-python -m patent_pipeline.cli parse --db data/patents.db --model qwen
+python -m patent_pipeline.cli parse --db data/patents.db --parser gemini
 ```
 
 ## API parser setup
 
-The parser expects a Qwen service running on the Berkeley Savio cluster, exposed through a vLLM OpenAI-compatible endpoint on port 8000.
+The parser expects `GEMINI_API_KEY` to be set in your environment. If you also use a proxy or OpenAI-compatible endpoint, you can still pass `PATENT_LLM_BASE_URL`, but Gemini is the default parser.
 
 Set the environment variables once on the login node or inside your Slurm job:
 
 ```bash
-export PATENT_LLM_BASE_URL=http://<NODE_IP>:8000
-export PATENT_LLM_MODEL=qwen
+export GEMINI_API_KEY=your_gemini_api_key
+export GEMINI_MODEL=gemini-2.0-flash
 ```
 
 Then parse the collected documents:
 
 ```bash
-patent-pipeline parse --db data/patent_pipeline.db --base-url "$PATENT_LLM_BASE_URL" --model "$PATENT_LLM_MODEL"
+patent-pipeline parse --db data/patent_pipeline.db --parser gemini
 ```
 
 If your vLLM server is protected, pass `--api-key` or export `PATENT_LLM_API_KEY`.
@@ -127,5 +127,5 @@ Notes: RDKit and some packages may require conda or platform-specific installs.
 ## Notes
 
 - Keep raw documents and parsed records separate.
-- Re-run the parser when you improve prompts or upgrade Qwen.
+- Re-run the parser when you improve prompts or upgrade your Gemini prompt/template.
 - Use the database as the source of truth for exact synthesis data.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
 from typing import Protocol
 
 from .database import PatentDatabase
@@ -21,8 +22,8 @@ class PatentParser(Protocol):
 
 
 @dataclass(slots=True)
-class QwenParserStub:
-    """Placeholder for the Savio-hosted Qwen parser."""
+class RawDocumentParserStub:
+    """Placeholder parser used while only collecting raw documents."""
 
     def parse(self, document: RawDocument) -> PatentRecord:
         title = document.title or document.source_url
@@ -32,7 +33,7 @@ class QwenParserStub:
             abstract=document.raw_text[:1000] if document.raw_text else None,
             source_url=document.source_url,
             raw_text=document.raw_text,
-            metadata={**document.metadata, "parser": "qwen_stub"},
+            metadata={**document.metadata, "parser": "raw_document_stub"},
         )
 
 
@@ -84,6 +85,36 @@ class IngestionPipeline:
             raw_html=str(raw_html) if raw_html is not None else None,
             metadata={"fetcher": "scrapling", "source_url": url},
         )
+
+    def search_google_patents(self, query: str, limit: int = 10) -> list[str]:
+        """Return a list of Google Patents URLs for a query.
+
+        This uses Scrapling's Fetcher so the search step stays within the
+        scraping stack the user requested.
+        """
+        if Fetcher is None:
+            raise ImportError("scrapling is required to search patent pages")
+
+        search_url = f"https://patents.google.com/?q={quote_plus(query)}&country=US"
+        page = Fetcher.get(search_url)
+        links: list[str] = []
+
+        for selector in ["a[href*='/patent/US']", "a[href*='patents.google.com/patent/US']"]:
+            try:
+                for item in page.css(selector):
+                    href = getattr(item, "attrib", {}).get("href")
+                    if not href:
+                        continue
+                    if href.startswith("/"):
+                        href = f"https://patents.google.com{href}"
+                    if href not in links:
+                        links.append(href)
+                    if len(links) >= limit:
+                        return links
+            except Exception:
+                continue
+
+        return links[:limit]
 
     def collect_url(self, url: str, source_type: str = "patent_html") -> RawDocument:
         document = self.fetch_raw_document(url, source_type=source_type)

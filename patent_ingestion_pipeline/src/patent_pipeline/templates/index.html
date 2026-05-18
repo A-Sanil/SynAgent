@@ -8,6 +8,8 @@
 </head>
 <body>
   <h1>Patent Parser - Review Queue</h1>
+  <p class="small" id="storage-status">Connecting to database…</p>
+  <p><a href="/batch_review">Batch review (low confidence)</a> • <a href="/status">API status</a></p>
   <form method="get" action="/search">
     <input name="q" placeholder="Search patents or reactions">
     <button type="submit">Search</button>
@@ -19,8 +21,7 @@
     <div class="brand"><span class="logo"></span><div><h1>Patent Parser</h1><div class="small">Review queue</div></div></div>
     <div class="controls">
       <input type="search" placeholder="Search..." onkeypress="if(event.key==='Enter'){location.href='/search?q='+this.value}">
-      <button class="btn" onclick="location.href='/runworker'">Run Worker</button>
-      
+      <button class="btn" id="run-worker-btn" type="button">Run Worker (1 job)</button>
     </div>
   </div>
   <table border="1" cellpadding="6">

@@ -1,4 +1,44 @@
+async function refreshStorageStatus(){
+  const el = document.getElementById('storage-status')
+  if(!el) return
+  try{
+    const res = await fetch('/api/status')
+    if(!res.ok){ el.textContent = 'API error: ' + res.status; return }
+    const s = await res.json()
+    const c = s.counts || {}
+    el.textContent = `Connected • DB: ${s.database} • Patents: ${c.patents||0} • Raw: ${c.raw_documents||0} • Queue: ${c.queue_pending||0}` + (s.gemini_configured ? '' : ' • Gemini key missing')
+  }catch(e){
+    el.textContent = 'Cannot reach API — restart runserver'
+  }
+}
+
+async function runWorkerTick(){
+  const status = document.getElementById('worker-status')
+  const btn = document.getElementById('run-worker-btn')
+  if(btn) btn.disabled = true
+  if(status) status.textContent = 'Processing…'
+  try{
+    const res = await fetch('/api/worker/tick', {method:'POST'})
+    const data = await res.json()
+    if(!res.ok){
+      alert(data.error || 'Worker failed')
+    } else {
+      alert(data.message || 'Done')
+      if(location.pathname === '/') refreshStorageStatus()
+      else location.reload()
+    }
+  }catch(e){
+    alert('Network error')
+  }finally{
+    if(btn) btn.disabled = false
+    if(status) status.textContent = 'Ready.'
+  }
+}
+
 document.addEventListener('DOMContentLoaded', ()=>{
+  refreshStorageStatus()
+  document.getElementById('run-worker-btn')?.addEventListener('click', runWorkerTick)
+
   const backdrop = document.getElementById('modal-backdrop')
   const openBtns = document.querySelectorAll('[data-open-modal]')
   const closeBtn = document.getElementById('modal-close')

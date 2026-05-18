@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>API Status</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>API &amp; Database Status</h1>
+    <p><a href="/">Back to review queue</a></p>
+    <div class="card">
+      <p><strong>Connected:</strong> {{ "yes" if database_exists else "no" }}</p>
+      <p><strong>Data directory:</strong> {{ data_dir }}</p>
+      <p><strong>Database:</strong> {{ database }}</p>
+      <p><strong>Gemini API key:</strong> {{ "set" if gemini_configured else "missing" }}</p>
+      <p><strong>Patents:</strong> {{ counts.patents }}</p>
+      <p><strong>Reactions:</strong> {{ counts.reactions }}</p>
+      <p><strong>Raw documents:</strong> {{ counts.raw_documents }}</p>
+      <p><strong>Queue pending:</strong> {{ counts.queue_pending }}</p>
+    </div>
+    <p class="small">JSON: <a href="/api/status">/api/status</a></p>
+  </div>
+</body>
+</html>

@@ -1,42 +1,58 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Request, Form
 import json
-from fastapi.responses import HTMLResponse, RedirectResponse
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import Body, FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pathlib import Path
-import os
-from dotenv import load_dotenv
 
+from .config import get_db_path, resolve_data_dir
 from .database import PatentDatabase
+
+load_dotenv()
 
 app = FastAPI(title="Patent Parser Review UI")
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-# mount static files for CSS/JS
-app.mount('/static', StaticFiles(directory=str(BASE_DIR / 'static')), name='static')
-
-# Load local .env if present so PATENT_* env vars are respected
-load_dotenv()
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
-def require_auth() -> bool:
-    # The UI is intentionally open for local use.
-    return True
+def _db() -> PatentDatabase:
+    return PatentDatabase()
+
+
+def _ctx(extra: dict | None = None) -> dict:
+    base = resolve_data_dir()
+    payload = {
+        "data_dir": str(base),
+        "db_path": str(get_db_path(base)),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request, db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
-    rows = db.connection.execute("SELECT patent_id, title, reviewed FROM patents ORDER BY reviewed, publication_date DESC LIMIT 200").fetchall()
+def index(request: Request):
+    db = _db()
+    rows = db.connection.execute(
+        "SELECT patent_id, title, reviewed FROM patents ORDER BY reviewed, publication_date DESC LIMIT 200"
+    ).fetchall()
     db.close()
-    return templates.TemplateResponse("index.html", {"request": request, "patents": rows})
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        _ctx({"patents": rows}),
+    )
 
 
 @app.post("/enqueue_all")
-def web_enqueue_all(db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
+def web_enqueue_all():
+    db = _db()
     cur = db.connection.execute("SELECT id FROM raw_documents ORDER BY id")
     count = 0
     for r in cur.fetchall():
@@ -46,84 +62,126 @@ def web_enqueue_all(db_path: str = "data/patent_pipeline.db"):
         except Exception:
             pass
     db.close()
-    return RedirectResponse(url='/', status_code=303)
+    return RedirectResponse(url="/", status_code=303)
 
 
-@app.get('/search', response_class=HTMLResponse)
-def web_search(request: Request, q: str = '', db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
+@app.get("/search", response_class=HTMLResponse)
+def web_search(request: Request, q: str = ""):
+    db = _db()
     patents = []
     reactions = []
     if q:
         try:
             res = db.search_text(q)
-            patents = res.get('patents', [])
-            reactions = res.get('reactions', [])
+            patents = res.get("patents", [])
+            reactions = res.get("reactions", [])
         except Exception:
             pass
     db.close()
-    return templates.TemplateResponse('search.html', {"request": request, "q": q, "patents": patents, "reactions": reactions})
+    return templates.TemplateResponse(
+        request,
+        "search.html",
+        _ctx({"q": q, "patents": patents, "reactions": reactions}),
+    )
 
 
-@app.get('/batch_review', response_class=HTMLResponse)
-def batch_review(request: Request, db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
-    # select reactions that have low or missing confidence
-    rows = db.connection.execute("SELECT * FROM reactions WHERE confidence IS NULL OR confidence < 0.6 ORDER BY patent_id LIMIT 200").fetchall()
+@app.get("/batch_review", response_class=HTMLResponse)
+def batch_review(request: Request):
+    db = _db()
+    rows = db.list_low_confidence_reactions()
     db.close()
-    return templates.TemplateResponse('batch_review.html', {"request": request, "reactions": rows})
+    return templates.TemplateResponse(
+        request,
+        "batch_review.html",
+        _ctx({"reactions": rows}),
+    )
 
 
-@app.post('/api/active_learning')
-def api_active_learning(payload: dict, db_path: str = "data/patent_pipeline.db"):
-    # payload: {reaction_id, patent_id, field, old_value, new_value, user}
-    rid = payload.get('reaction_id')
-    pid = payload.get('patent_id')
-    field = payload.get('field')
-    old = payload.get('old_value')
-    new = payload.get('new_value')
-    user = payload.get('user') or 'web'
-    db = PatentDatabase(db_path)
+@app.post("/api/active_learning")
+def api_active_learning(payload: dict = Body(...)):
+    rid = payload.get("reaction_id")
+    pid = payload.get("patent_id")
+    field = payload.get("field")
+    old = payload.get("old_value")
+    new = payload.get("new_value")
+    user = payload.get("user") or "web"
+    if not rid or not field:
+        raise HTTPException(status_code=400, detail="reaction_id and field are required")
+
+    db = _db()
     with db.connection:
         db.connection.execute(
             "INSERT INTO active_learning (reaction_id, patent_id, field, old_value, new_value, user) VALUES (?, ?, ?, ?, ?, ?)",
             (rid, pid, field, old, new, user),
         )
-        # apply correction to reactions row if applicable
-        if field and rid and new is not None:
-            # simple update for common fields
-            if field in ('product_smiles', 'notes'):
-                db.connection.execute(f"UPDATE reactions SET {field} = ? WHERE reaction_id = ?", (new, rid))
+        if new is not None:
+            if field == "product_smiles":
+                from .chem_ner import normalize_smiles
+
+                normalized = normalize_smiles(str(new))
+                if normalized is None:
+                    db.close()
+                    raise HTTPException(status_code=400, detail="Invalid product SMILES")
+                new = normalized
+            db.update_reaction_field(str(rid), str(field), new)
+            row = db.connection.execute("SELECT * FROM reactions WHERE reaction_id = ?", (rid,)).fetchone()
+            if row:
+                from .models import ReactionRecord
+
+                rr = ReactionRecord(
+                    reaction_id=row["reaction_id"],
+                    patent_id=row["patent_id"],
+                    reaction_smarts=row["reaction_smarts"],
+                    reactant_smiles=json.loads(row["reactant_smiles_json"] or "[]"),
+                    product_smiles=row["product_smiles"],
+                    yield_percent=row["yield_percent"],
+                    temperature_celsius=row["temperature_celsius"],
+                    solvent=row["solvent"],
+                    catalyst=row["catalyst"],
+                    time_hours=row["time_hours"],
+                    mechanism_text=row["mechanism_text"],
+                    notes=row["notes"],
+                )
+                db._index_reaction_fts(rr)
     db.close()
     return {"status": "ok"}
 
 
 @app.get("/patent/{patent_id}", response_class=HTMLResponse)
-def view_patent(request: Request, patent_id: str, db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
+def view_patent(request: Request, patent_id: str):
+    db = _db()
     p = db.connection.execute("SELECT * FROM patents WHERE patent_id = ?", (patent_id,)).fetchone()
     reactions = db.connection.execute("SELECT * FROM reactions WHERE patent_id = ?", (patent_id,)).fetchall()
     db.close()
-    return templates.TemplateResponse("patent.html", {"request": request, "patent": p, "reactions": reactions})
+    if p is None:
+        raise HTTPException(status_code=404, detail="Patent not found")
+    return templates.TemplateResponse(
+        request,
+        "patent.html",
+        _ctx({"patent": p, "reactions": reactions}),
+    )
 
 
 @app.post("/patent/{patent_id}/approve")
-def approve_patent(patent_id: str, db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
+def approve_patent(patent_id: str):
+    db = _db()
     db.mark_patent_reviewed(patent_id, True)
     db.close()
     return RedirectResponse(url=f"/patent/{patent_id}", status_code=303)
 
 
 @app.post("/patent/{patent_id}/update")
-def update_patent(patent_id: str, title: str = Form(...), abstract: str = Form(""), db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
+def update_patent(patent_id: str, title: str = Form(...), abstract: str = Form("")):
+    db = _db()
     with db.connection:
-        db.connection.execute("UPDATE patents SET title = ?, abstract = ? WHERE patent_id = ?", (title, abstract, patent_id))
-        # re-index
+        db.connection.execute(
+            "UPDATE patents SET title = ?, abstract = ? WHERE patent_id = ?",
+            (title, abstract, patent_id),
+        )
         row = db.connection.execute("SELECT * FROM patents WHERE patent_id = ?", (patent_id,)).fetchone()
         if row:
             from .models import PatentRecord
+
             pr = PatentRecord(
                 patent_id=row["patent_id"],
                 title=row["title"],
@@ -138,17 +196,23 @@ def update_patent(patent_id: str, title: str = Form(...), abstract: str = Form("
 
 
 @app.post("/patent/{patent_id}/reaction/{reaction_id}/update")
-def update_reaction(patent_id: str, reaction_id: str, product_smiles: str = Form(None), yield_percent: str = Form(None), notes: str = Form(None), db_path: str = "data/patent_pipeline.db"):
-    db = PatentDatabase(db_path)
+def update_reaction(
+    patent_id: str,
+    reaction_id: str,
+    product_smiles: str = Form(None),
+    yield_percent: str = Form(None),
+    notes: str = Form(None),
+):
+    db = _db()
     with db.connection:
         db.connection.execute(
             "UPDATE reactions SET product_smiles = ?, yield_percent = ?, notes = ? WHERE reaction_id = ?",
             (product_smiles, float(yield_percent) if yield_percent else None, notes, reaction_id),
         )
-        # re-index reaction
         row = db.connection.execute("SELECT * FROM reactions WHERE reaction_id = ?", (reaction_id,)).fetchone()
         if row:
             from .models import ReactionRecord
+
             rr = ReactionRecord(
                 reaction_id=row["reaction_id"],
                 patent_id=row["patent_id"],
@@ -168,32 +232,31 @@ def update_reaction(patent_id: str, reaction_id: str, product_smiles: str = Form
     return RedirectResponse(url=f"/patent/{patent_id}", status_code=303)
 
 
-@app.post('/api/reaction/update')
-def api_update_reaction(payload: dict, db_path: str = "data/patent_pipeline.db"):
-    # payload: {patent_id,reaction_id,product_smiles,yield_percent,notes}
-    patent_id = payload.get('patent_id')
-    reaction_id = payload.get('reaction_id')
-    product_smiles = payload.get('product_smiles')
-    yp = payload.get('yield_percent')
-    notes = payload.get('notes')
+@app.post("/api/reaction/update")
+def api_update_reaction(payload: dict = Body(...)):
+    patent_id = payload.get("patent_id")
+    reaction_id = payload.get("reaction_id")
+    product_smiles = payload.get("product_smiles")
+    yp = payload.get("yield_percent")
+    notes = payload.get("notes")
     from .chem_ner import normalize_smiles
-    db = PatentDatabase(db_path)
-    # validate/normalize SMILES if provided
+
+    db = _db()
     if product_smiles:
-        ns = normalize_smiles(product_smiles)
-        if ns is None:
+        normalized = normalize_smiles(str(product_smiles))
+        if normalized is None:
+            db.close()
             raise HTTPException(status_code=400, detail="Invalid product SMILES")
-        product_smiles = ns
-    # update reaction row
+        product_smiles = normalized
     with db.connection:
         db.connection.execute(
             "UPDATE reactions SET product_smiles = ?, yield_percent = ?, notes = ? WHERE reaction_id = ?",
-            (product_smiles, float(yp) if yp not in (None, '') else None, notes, reaction_id),
+            (product_smiles, float(yp) if yp not in (None, "") else None, notes, reaction_id),
         )
-        # re-index
         row = db.connection.execute("SELECT * FROM reactions WHERE reaction_id = ?", (reaction_id,)).fetchone()
         if row:
             from .models import ReactionRecord
+
             rr = ReactionRecord(
                 reaction_id=row["reaction_id"],
                 patent_id=row["patent_id"],
@@ -210,4 +273,88 @@ def api_update_reaction(payload: dict, db_path: str = "data/patent_pipeline.db")
             )
             db._index_reaction_fts(rr)
     db.close()
-    return {"status":"ok"}
+    return {"status": "ok", "patent_id": patent_id, "reaction_id": reaction_id}
+
+
+@app.get("/runworker", response_class=HTMLResponse)
+def runworker_page(request: Request):
+    """Legacy URL from the UI button — show worker controls."""
+    return templates.TemplateResponse(
+        request,
+        "runworker.html",
+        _ctx(),
+    )
+
+
+@app.post("/api/worker/tick")
+def api_worker_tick():
+    """Process one parse-queue job (same as a single worker iteration)."""
+    from .llm_parser import GeminiLLMParser
+    from .pipeline import IngestionPipeline
+
+    db = _db()
+    try:
+        pipeline = IngestionPipeline(database=db, parser=GeminiLLMParser())
+        processed = pipeline.process_queue_once()
+    except ValueError as exc:
+        db.close()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except Exception as exc:
+        db.close()
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    db.close()
+    return {
+        "ok": True,
+        "processed": processed,
+        "message": "Parsed one document" if processed else "Queue empty — collect and enqueue patents first",
+    }
+
+
+@app.get("/status", response_class=HTMLResponse)
+def status_page(request: Request):
+    """Human-readable connection / database summary."""
+    base = resolve_data_dir()
+    db_path = get_db_path(base)
+    payload = {
+        "data_dir": str(base),
+        "database": str(db_path),
+        "database_exists": db_path.exists(),
+        "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+        "counts": {"patents": 0, "reactions": 0, "raw_documents": 0, "queue_pending": 0},
+    }
+    if db_path.exists():
+        db = PatentDatabase()
+        payload["counts"]["patents"] = db.connection.execute("SELECT COUNT(*) FROM patents").fetchone()[0]
+        payload["counts"]["reactions"] = db.connection.execute("SELECT COUNT(*) FROM reactions").fetchone()[0]
+        payload["counts"]["raw_documents"] = db.connection.execute("SELECT COUNT(*) FROM raw_documents").fetchone()[0]
+        payload["counts"]["queue_pending"] = db.connection.execute(
+            "SELECT COUNT(*) FROM parse_queue WHERE status = 'pending'"
+        ).fetchone()[0]
+        db.close()
+    return templates.TemplateResponse(request, "status.html", _ctx(payload))
+
+
+@app.get("/api/status")
+def api_status():
+    base = resolve_data_dir()
+    db_path = get_db_path(base)
+    exists = db_path.exists()
+    counts = {"patents": 0, "reactions": 0, "raw_documents": 0, "queue_pending": 0}
+    if exists:
+        db = PatentDatabase()
+        counts["patents"] = db.connection.execute("SELECT COUNT(*) FROM patents").fetchone()[0]
+        counts["reactions"] = db.connection.execute("SELECT COUNT(*) FROM reactions").fetchone()[0]
+        counts["raw_documents"] = db.connection.execute("SELECT COUNT(*) FROM raw_documents").fetchone()[0]
+        counts["queue_pending"] = db.connection.execute(
+            "SELECT COUNT(*) FROM parse_queue WHERE status = 'pending'"
+        ).fetchone()[0]
+        db.close()
+    return JSONResponse(
+        {
+            "data_dir": str(base),
+            "database": str(db_path),
+            "database_exists": exists,
+            "counts": counts,
+            "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+        }
+    )

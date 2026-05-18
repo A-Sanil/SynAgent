@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Parse Worker</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Parse Worker</h1>
+    <p class="small">Database: {{ db_path }}</p>
+    <p id="worker-status" class="small">Ready.</p>
+    <div style="display:flex;gap:8px;margin:12px 0">
+      <button class="btn" id="run-worker-btn" type="button">Process one queued patent</button>
+      <a href="/" class="btn secondary">Back to review</a>
+    </div>
+    <p class="small">For continuous parsing, run in PowerShell:<br>
+      <code>python -m patent_pipeline.cli run-worker</code>
+    </p>
+  </div>
+</body>
+</html>
