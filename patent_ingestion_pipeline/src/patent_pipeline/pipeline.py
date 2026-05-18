@@ -3,18 +3,50 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import quote_plus
 from typing import Protocol
+from urllib.parse import quote_plus
 
 from .database import PatentDatabase
 from .models import PatentRecord, RawDocument, ReactionRecord
+from . import patent_search
+
+_log = logging.getLogger(__name__)
+
+PATENT_URL_RE = re.compile(r"patents\.google\.com/patent/(US[^/?#]+)", re.I)
+
+
+def _load_fetcher():
+    try:
+        from scrapling import Fetcher as _Fetcher
+
+        return _Fetcher
+    except ImportError as exc:
+        raise ImportError(
+            "Scrapling is not installed or is missing dependencies. "
+            "In your project folder run: python -m pip install -e . "
+            "If it still fails, also run: python -m pip install curl-cffi scrapling"
+        ) from exc
+
+
+def _load_dynamic_fetcher():
+    try:
+        from scrapling import DynamicFetcher as _DynamicFetcher
+
+        return _DynamicFetcher
+    except ImportError:
+        return None
+
 
 try:
-    from scrapling import Fetcher
+    Fetcher = _load_fetcher()
 except ImportError:  # pragma: no cover
     Fetcher = None
+
+DynamicFetcher = _load_dynamic_fetcher()
 
 
 class PatentParser(Protocol):
@@ -27,8 +59,9 @@ class RawDocumentParserStub:
 
     def parse(self, document: RawDocument) -> PatentRecord:
         title = document.title or document.source_url
+        patent_id = document.metadata.get("patent_id") or document.metadata.get("publication_number")
         return PatentRecord(
-            patent_id=document.metadata.get("patent_id", title),
+            patent_id=str(patent_id or title),
             title=title,
             abstract=document.raw_text[:1000] if document.raw_text else None,
             source_url=document.source_url,
@@ -42,11 +75,52 @@ class IngestionPipeline:
         self.database = database
         self.parser = parser
 
-    def fetch_raw_document(self, url: str, source_type: str = "patent_html") -> RawDocument:
+    def _fetch_page(self, url: str):
+        """Fetch with static Scrapling; optional browser fallback for empty SPAs."""
         if Fetcher is None:
             raise ImportError("scrapling is required to collect raw patent pages")
+        page = Fetcher.get(url)
+        text = getattr(page, "text", None) or ""
+        if len(text.strip()) < 200 and DynamicFetcher is not None:
+            try:
+                _log.info("Static fetch empty for %s — trying DynamicFetcher", url)
+                page = DynamicFetcher.get(url, headless=True, network_idle=True)
+            except Exception as exc:
+                _log.warning("DynamicFetcher failed for %s: %s", url, exc)
+        return page
 
-        # special-case PDF URLs: prefer PDF collector
+    def _patent_id_from_url(self, url: str) -> str | None:
+        match = PATENT_URL_RE.search(url)
+        return patent_search.normalize_patent_id(match.group(1)) if match else None
+
+    def _document_from_xhr(self, url: str) -> RawDocument | None:
+        pub = self._patent_id_from_url(url)
+        if not pub:
+            return None
+        payload = patent_search.fetch_patent_document(pub)
+        text = payload.get("text")
+        if not text:
+            return None
+        return RawDocument(
+            source_url=url,
+            source_type="patent_xhr",
+            fetched_at=datetime.now(tz=timezone.utc),
+            title=payload.get("title"),
+            content_type="application/json",
+            raw_text=text,
+            raw_html=None,
+            metadata={
+                "fetcher": "google_patents_xhr",
+                "publication_number": pub,
+                "patent_id": pub,
+                "source_url": url,
+            },
+        )
+
+    def fetch_raw_document(self, url: str, source_type: str = "patent_html") -> RawDocument:
+        if Fetcher is None and not url.lower().endswith(".pdf"):
+            raise ImportError("scrapling is required to collect raw patent pages")
+
         if url.lower().endswith(".pdf"):
             try:
                 from .collector_pdf import collect_pdf_from_url
@@ -65,8 +139,13 @@ class IngestionPipeline:
             except Exception:
                 pass
 
-        page = Fetcher.get(url)
-        raw_html = getattr(page, "html", None)
+        if "patents.google.com/patent/" in url:
+            xhr_doc = self._document_from_xhr(url)
+            if xhr_doc is not None:
+                return xhr_doc
+
+        page = self._fetch_page(url)
+        raw_html = getattr(page, "body", None) or getattr(page, "html", None)
         raw_text = getattr(page, "text", None)
         title = None
         if hasattr(page, "css"):
@@ -74,6 +153,11 @@ class IngestionPipeline:
                 title = page.css("title::text").get()
             except Exception:
                 title = None
+
+        if (not raw_text or len(str(raw_text).strip()) < 200) and "patents.google.com" in url:
+            xhr_doc = self._document_from_xhr(url)
+            if xhr_doc is not None:
+                return xhr_doc
 
         return RawDocument(
             source_url=url,
@@ -87,41 +171,61 @@ class IngestionPipeline:
         )
 
     def search_google_patents(self, query: str, limit: int = 10) -> list[str]:
-        """Return a list of Google Patents URLs for a query.
-
-        This uses Scrapling's Fetcher so the search step stays within the
-        scraping stack the user requested.
-        """
-        if Fetcher is None:
-            raise ImportError("scrapling is required to search patent pages")
-
-        search_url = f"https://patents.google.com/?q={quote_plus(query)}&country=US"
-        page = Fetcher.get(search_url)
+        """Return Google Patents URLs for a US chemistry search query."""
         links: list[str] = []
+        seen: set[str] = set()
 
-        for selector in ["a[href*='/patent/US']", "a[href*='patents.google.com/patent/US']"]:
-            try:
-                for item in page.css(selector):
-                    href = getattr(item, "attrib", {}).get("href")
-                    if not href:
+        # Primary: Google Patents xhr JSON API (reliable, no browser).
+        try:
+            for hit in patent_search.search_us_patents(query, limit=limit):
+                url = hit.get("url")
+                if url and url not in seen:
+                    seen.add(url)
+                    links.append(url)
+                if len(links) >= limit:
+                    _log.info("xhr search found %s patents for %r", len(links), query)
+                    return links
+        except Exception as exc:
+            _log.warning("xhr patent search failed: %s", exc)
+
+        if Fetcher is None:
+            return links[:limit]
+
+        # Fallback: rendered HTML via Scrapling.
+        search_url = f"https://patents.google.com/?q={quote_plus(query)}&country=US"
+        try:
+            page = self._fetch_page(search_url)
+            html = str(getattr(page, "text", None) or getattr(page, "body", None) or "")
+            for url in patent_search.extract_patent_urls_from_html(html, limit=limit):
+                if url not in seen:
+                    seen.add(url)
+                    links.append(url)
+            if links:
+                return links[:limit]
+            if hasattr(page, "css"):
+                for selector in ("a[href*='/patent/US']", "a[href*='patent/US']"):
+                    try:
+                        for item in page.css(selector):
+                            href = getattr(item, "attrib", {}).get("href")
+                            if not href:
+                                continue
+                            if href.startswith("/"):
+                                href = f"https://patents.google.com{href}"
+                            if href not in seen:
+                                seen.add(href)
+                                links.append(href)
+                            if len(links) >= limit:
+                                return links
+                    except Exception:
                         continue
-                    if href.startswith("/"):
-                        href = f"https://patents.google.com{href}"
-                    if href not in links:
-                        links.append(href)
-                    if len(links) >= limit:
-                        return links
-            except Exception:
-                continue
+        except Exception as exc:
+            _log.warning("HTML patent search failed: %s", exc)
 
         return links[:limit]
 
     def collect_url(self, url: str, source_type: str = "patent_html") -> RawDocument:
         document = self.fetch_raw_document(url, source_type=source_type)
-        # persist raw document
         self.database.add_raw_document(document)
-        # enqueue for parsing
-        # find the id of the last inserted raw document
         cur = self.database.connection.execute("SELECT id FROM raw_documents ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
         if row:
@@ -155,7 +259,6 @@ class IngestionPipeline:
             parsed_records.append(self.parse_document(document))
         return parsed_records
 
-
     def process_queue_once(self) -> int:
         """Process a single queue item if available. Returns 1 if processed, 0 if none."""
         item = self.database.get_next_queue_item()
@@ -163,7 +266,6 @@ class IngestionPipeline:
             return 0
         queue_id = int(item["id"])
         raw_id = int(item["raw_document_id"])
-        # load raw document
         row = self.database.connection.execute("SELECT * FROM raw_documents WHERE id = ?", (raw_id,)).fetchone()
         if not row:
             self.database.update_queue_status(queue_id, "failed")
@@ -183,7 +285,6 @@ class IngestionPipeline:
             self.database.update_queue_status(queue_id, "done")
             return 1
         except Exception:
-            # increment attempts
             attempts = int(item["attempts"]) + 1
             if attempts >= 3:
                 self.database.update_queue_status(queue_id, "failed", attempts=attempts)

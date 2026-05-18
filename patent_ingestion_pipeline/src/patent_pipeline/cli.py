@@ -104,11 +104,18 @@ def collect_search(
     limit: int = 10,
     db_path: Optional[Path] = typer.Option(None, "--db"),
     data_dir: Optional[Path] = typer.Option(None, "--data-dir"),
+    crawler: str = typer.Option("dynamic", help="Fetch profile: dynamic | stealth | auto"),
 ) -> None:
     """Search Google Patents for US results via Scrapling and collect the pages."""
+    from .crawler_registry import get_profile
+
+    from .fetchers_bridge import search_patent_urls
+
     db = _open_db(db_path, data_dir)
+    profile = get_profile(crawler)
     pipeline = IngestionPipeline(database=db, parser=RawDocumentParserStub())
-    urls = pipeline.search_google_patents(query=query, limit=limit)
+    urls, fetcher = search_patent_urls(query, limit=limit, mode=profile.search_mode)
+    typer.echo(f"Search fetcher: {fetcher}")
     if not urls:
         db.close()
         typer.echo(f"No patent URLs found for query: {query}")
@@ -198,6 +205,109 @@ def run_worker(
         typer.echo("Worker stopped")
     finally:
         db.close()
+
+
+@app.command("run-crawler")
+def run_crawler(
+    data_dir: Optional[Path] = typer.Option(None, "--data-dir"),
+    queries_file: Optional[Path] = typer.Option(None, "--queries-file"),
+    limit: int = 8,
+    crawler: str = typer.Option(
+        "dynamic",
+        help="Profile: static | dynamic | stealth | spider | auto",
+    ),
+    cycles: int = typer.Option(0, help="Repeat N collect cycles (0 = run once)"),
+) -> None:
+    """Run one or more collect cycles using Scrapling browser/spider crawlers."""
+    import os
+    import time
+
+    from .autonomous import AutonomousAgent, AgentConfig, load_queries
+    from .config import resolve_data_dir
+
+    if data_dir is not None:
+        os.environ["PATENT_DATA_DIR"] = str(resolve_data_dir(data_dir))
+    cfg = AgentConfig.from_env(data_dir)
+    cfg.crawler = crawler
+    if queries_file:
+        cfg.queries = load_queries(queries_file)
+    cfg.patents_per_query = limit
+    agent = AutonomousAgent(cfg)
+    n = max(cycles, 1)
+    for i in range(n):
+        typer.echo(f"Crawler cycle {i + 1}/{n} ({crawler})")
+        agent.collect_cycle()
+        if cycles == 0 or i + 1 >= n:
+            break
+        time.sleep(5)
+
+
+@app.command("test-search")
+def test_search(
+    query: str,
+    limit: int = 5,
+    data_dir: Optional[Path] = typer.Option(None, "--data-dir"),
+) -> None:
+    """Verify patent search returns US URLs (xhr + fallbacks)."""
+    from .pipeline import IngestionPipeline, RawDocumentParserStub
+
+    db = _open_db(None, data_dir)
+    pipe = IngestionPipeline(database=db, parser=RawDocumentParserStub())
+    urls = pipe.search_google_patents(query=query, limit=limit)
+    typer.echo(f"Found {len(urls)} patent URL(s) for: {query}")
+    for url in urls:
+        typer.echo(f"  {url}")
+    if urls:
+        doc = pipe.fetch_raw_document(urls[0])
+        typer.echo(f"Sample raw text length: {len(doc.raw_text or '')} chars ({doc.source_type})")
+    db.close()
+    if not urls:
+        raise typer.Exit(code=1)
+
+
+@app.command("run-autonomous")
+def run_autonomous_cmd(
+    data_dir: Optional[Path] = typer.Option(None, "--data-dir", help="USB data root"),
+    queries_file: Optional[Path] = typer.Option(
+        None,
+        "--queries-file",
+        help="One chemistry search query per line (default: data/chemistry_queries.txt)",
+    ),
+    limit: int = typer.Option(8, help="US patents to collect per query each cycle"),
+    parse_batch: int = typer.Option(5, help="Patents to parse per cycle"),
+    sleep: float = typer.Option(120.0, help="Seconds between cycles when queue is empty"),
+    with_ui: bool = typer.Option(True, "--ui/--no-ui", help="Start review UI in background"),
+    port: int = typer.Option(8001, help="Review UI port"),
+    model: str = "gemini-2.0-flash",
+    api_key: str | None = typer.Option(None, help="Gemini API key"),
+    crawler: str = typer.Option(
+        "dynamic",
+        help="Scrapling profile: dynamic | stealth | spider | auto",
+    ),
+) -> None:
+    """Run continuously: Scrapling collect → enqueue → Gemini parse → USB database."""
+    import os
+
+    from .autonomous import run_autonomous
+
+    if data_dir is not None:
+        os.environ["PATENT_DATA_DIR"] = str(resolve_data_dir(data_dir))
+    typer.echo("Autonomous agent starting — Ctrl+C to stop")
+    typer.echo(f"Data: {resolve_data_dir(data_dir)}")
+    typer.echo(f"Review UI: http://127.0.0.1:{port}/ (if --ui)")
+    typer.echo(f"Crawler: http://127.0.0.1:{port}/crawler")
+    run_autonomous(
+        data_dir=data_dir,
+        queries_file=queries_file,
+        patents_per_query=limit,
+        parse_batch=parse_batch,
+        collect_sleep=sleep,
+        with_ui=with_ui,
+        ui_port=port,
+        model=model,
+        api_key=api_key,
+        crawler=crawler,
+    )
 
 
 @app.command("run-full-pipeline")

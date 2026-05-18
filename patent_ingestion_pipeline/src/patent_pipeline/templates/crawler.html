@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Crawler Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/crawler.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Crawler Dashboard</h1>
+    <p><a href="/">Review queue</a> · <a href="/status">Database status</a></p>
+    <p class="small">Data: {{ data_dir }}</p>
+    <div class="card" id="live-status">
+      <h2>Live crawler</h2>
+      <p id="crawler-message">Loading…</p>
+      <p class="small" id="crawler-detail"></p>
+    </div>
+    <div class="card">
+      <h2>Database counts</h2>
+      <p id="db-counts">—</p>
+    </div>
+    <div class="card">
+      <h2>Recent crawl runs</h2>
+      <table border="1" cellpadding="6" id="runs-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Profile</th><th>Query</th>
+            <th>Found</th><th>New</th><th>Skip</th><th>Err</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="small">Profiles: static · dynamic (browser) · stealth · spider (concurrent)</p>
+  </div>
+</body>
+</html>

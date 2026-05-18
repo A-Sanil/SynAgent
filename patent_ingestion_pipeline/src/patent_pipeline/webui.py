@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,14 +12,30 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import get_db_path, resolve_data_dir
+from .crawl_tracker import tracker
+from .crawler_registry import PROFILES
 from .database import PatentDatabase
 
 load_dotenv()
 
 app = FastAPI(title="Patent Parser Review UI")
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+def _resource_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = _resource_root()
+_templates_dir = BASE_DIR / "templates"
+_static_dir = BASE_DIR / "static"
+if not _templates_dir.is_dir():
+    _templates_dir = Path(__file__).resolve().parent / "templates"
+    _static_dir = Path(__file__).resolve().parent / "static"
+
+templates = Jinja2Templates(directory=str(_templates_dir))
+app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
 def _db() -> PatentDatabase:
@@ -332,6 +349,32 @@ def status_page(request: Request):
         ).fetchone()[0]
         db.close()
     return templates.TemplateResponse(request, "status.html", _ctx(payload))
+
+
+@app.get("/crawler", response_class=HTMLResponse)
+def crawler_dashboard(request: Request):
+    return templates.TemplateResponse(request, "crawler.html", _ctx({"profiles": list(PROFILES.keys())}))
+
+
+@app.get("/api/crawler/status")
+def api_crawler_status():
+    base = resolve_data_dir()
+    db_path = get_db_path(base)
+    payload: dict = {"crawler": tracker.snapshot(), "database": str(db_path), "counts": {}, "runs": []}
+    if db_path.exists():
+        db = PatentDatabase()
+        payload["counts"] = {
+            "patents": db.connection.execute("SELECT COUNT(*) FROM patents").fetchone()[0],
+            "reactions": db.connection.execute("SELECT COUNT(*) FROM reactions").fetchone()[0],
+            "raw_documents": db.connection.execute("SELECT COUNT(*) FROM raw_documents").fetchone()[0],
+            "queue_pending": db.connection.execute(
+                "SELECT COUNT(*) FROM parse_queue WHERE status = 'pending'"
+            ).fetchone()[0],
+        }
+        runs = db.list_crawl_runs(limit=20)
+        payload["runs"] = [dict(r) for r in runs]
+        db.close()
+    return JSONResponse(payload)
 
 
 @app.get("/api/status")

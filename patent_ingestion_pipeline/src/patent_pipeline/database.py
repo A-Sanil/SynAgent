@@ -145,6 +145,23 @@ class PatentDatabase:
 
     def _migrate_schema(self) -> None:
         """Apply lightweight schema upgrades for existing databases."""
+        with self.connection:
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS crawl_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    finished_at TEXT,
+                    profile TEXT,
+                    query TEXT,
+                    urls_found INTEGER DEFAULT 0,
+                    collected INTEGER DEFAULT 0,
+                    skipped INTEGER DEFAULT 0,
+                    errors INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'running'
+                );
+                """
+            )
         cols = {row[1] for row in self.connection.execute("PRAGMA table_info(reactions)").fetchall()}
         if "confidence" not in cols:
             with self.connection:
@@ -385,6 +402,13 @@ class PatentDatabase:
             return {"patents": patents, "reactions": reactions}
 
     # ---------------- Queue helpers ----------------
+    def has_source_url(self, url: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM raw_documents WHERE source_url = ? LIMIT 1",
+            (url,),
+        ).fetchone()
+        return row is not None
+
     def enqueue_raw_document(self, raw_document_id: int) -> int:
         """Add a raw document to the parse queue; returns queue id."""
         with self.connection:
@@ -393,6 +417,26 @@ class PatentDatabase:
                 (raw_document_id,),
             )
             return cur.lastrowid
+
+    def enqueue_unqueued_raw_documents(self) -> int:
+        """Enqueue raw documents that are not already on the parse queue."""
+        rows = self.connection.execute(
+            """
+            SELECT r.id FROM raw_documents r
+            WHERE NOT EXISTS (
+                SELECT 1 FROM parse_queue q WHERE q.raw_document_id = r.id
+            )
+            ORDER BY r.id
+            """
+        ).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                self.enqueue_raw_document(int(row["id"]))
+                count += 1
+            except Exception:
+                pass
+        return count
 
     def get_next_queue_item(self) -> sqlite3.Row | None:
         """Fetch next pending queue item (atomic lock via status update)."""
@@ -422,6 +466,35 @@ class PatentDatabase:
     def mark_patent_reviewed(self, patent_id: str, reviewed: bool = True) -> None:
         with self.connection:
             self.connection.execute("UPDATE patents SET reviewed = ? WHERE patent_id = ?", (1 if reviewed else 0, patent_id))
+
+    def record_crawl_run(
+        self,
+        profile: str,
+        query: str,
+        urls_found: int = 0,
+        collected: int = 0,
+        skipped: int = 0,
+        errors: int = 0,
+        status: str = "done",
+    ) -> int:
+        with self.connection:
+            cur = self.connection.execute(
+                """
+                INSERT INTO crawl_runs (
+                    profile, query, urls_found, collected, skipped, errors, status, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (profile, query, urls_found, collected, skipped, errors, status),
+            )
+            return int(cur.lastrowid)
+
+    def list_crawl_runs(self, limit: int = 50) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """
+            SELECT * FROM crawl_runs ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
     def list_low_confidence_reactions(self, threshold: float = 0.6, limit: int = 200) -> list[sqlite3.Row]:
         return self.connection.execute(
