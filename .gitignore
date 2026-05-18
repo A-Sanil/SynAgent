@@ -11,3 +11,17 @@ wheels/
 
 # Environment variables
 .env
+
+# Data directories — stored on USB, never committed
+patent_ingestion_pipeline/data/
+patent_ingestion_pipeline/ord_data/
+ord_data/
+
+# DB files anywhere
+*.db
+*.db-wal
+*.db-shm
+
+# Worker logs
+patent_ingestion_pipeline/worker_log.txt
+patent_ingestion_pipeline/worker_err.txt
