@@ -38,7 +38,7 @@ for i in range(max_iters):
         capture_output=True,
         text=True,
         timeout=180,
-        env={**os.environ, "PATENT_DATA_DIR": "./data", "PYTHONIOENCODING": "utf-8"},
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     if result.stdout:
         lines = result.stdout.strip().splitlines()

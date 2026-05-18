@@ -1,6 +1,6 @@
 """Reset stuck queue items and show status."""
 import os
-os.environ['PATENT_DATA_DIR'] = './data'
+os.environ.setdefault("PATENT_DATA_DIR", "./data")
 from src.patent_pipeline.database import PatentDatabase
 db = PatentDatabase()
 n = db.connection.execute(

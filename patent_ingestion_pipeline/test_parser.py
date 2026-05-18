@@ -1,6 +1,6 @@
 """Quick test: parse one chemistry paper with Gemini."""
 import os, json, time
-os.environ['PATENT_DATA_DIR'] = './data'
+os.environ.setdefault("PATENT_DATA_DIR", "./data")
 
 from src.patent_pipeline.database import PatentDatabase
 from src.patent_pipeline.llm_parser import GeminiLLMParser
