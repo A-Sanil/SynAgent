@@ -9,7 +9,7 @@ from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from .validation import agent as validation_agent
 from .optimization import agent as optimization_agent
 from .chemspace import agent as chemspace_agent
-from .ordtool import agent as ord_agent
+from .ordtool import agent as ord_agent  # now backed by real reaction DB
 
 from ..chemspacetool import ChemspaceDeps
 from ..tokenmanager import ChemspaceTokenManager
@@ -53,7 +53,9 @@ Do not invent hazard codes—the optimization agent fetches real data from PubCh
 Do not invent ORD results.
 If information is missing, clearly say what is missing.""".strip()
 
-model = GoogleModel("gemini-3-flash-preview")
+import os
+_model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+model = GoogleModel(_model_name)
 agent = Agent(
     model,
     output_type=str,

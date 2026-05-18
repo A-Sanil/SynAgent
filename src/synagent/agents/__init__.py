@@ -10,8 +10,9 @@ from .master import agent as master_agent
 
 load_dotenv()
 
+import os as _os
 DEFAULT_MODEL = GoogleModel(
-    model_name="gemini-3-flash-preview",
+    model_name=_os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
     provider="google-gla",
     settings=GoogleModelSettings(
         google_thinking_config={"thinking_budget": 0},  # disable thinking
