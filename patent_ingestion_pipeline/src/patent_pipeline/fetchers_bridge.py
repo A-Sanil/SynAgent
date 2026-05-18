@@ -120,6 +120,15 @@ def fetch_page(url: str, mode: str = "auto") -> tuple[Any, str]:
 
 def search_patent_urls(query: str, limit: int = 10, mode: str = "auto") -> tuple[list[str], str]:
     """Search Google Patents and return US patent page URLs."""
+    from . import patent_search
+    try:
+        hits = patent_search.search_us_patents(query, limit=limit)
+        links = [hit["url"] for hit in hits if hit.get("url")]
+        if links:
+            return links, "xhr"
+    except Exception as exc:
+        _log.warning("XHR search failed, falling back to browser: %s", exc)
+
     url = google_patents_search_url(query)
     page, used = fetch_page(url, mode=mode)
     html = _response_html(page)

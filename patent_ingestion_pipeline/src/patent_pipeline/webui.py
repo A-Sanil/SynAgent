@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, Form, HTTPException, Request
+from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -80,6 +80,82 @@ def web_enqueue_all():
             pass
     db.close()
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/upload_patent")
+async def upload_patent(file: UploadFile = File(...)):
+    import uuid
+    import csv
+    from io import StringIO
+    from datetime import datetime, timezone
+    from .models import RawDocument
+
+    db = _db()
+    content = await file.read()
+    try:
+        text_content = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text_content = content.decode("latin-1")
+
+    filename = (file.filename or "uploaded.txt").lower()
+
+    if filename.endswith(".csv"):
+        reader = csv.DictReader(StringIO(text_content))
+        for row in reader:
+            doc = RawDocument(
+                source_url=row.get("url") or row.get("source_url") or f"upload://{uuid.uuid4().hex[:8]}",
+                source_type="bulk_csv",
+                fetched_at=datetime.now(timezone.utc),
+                title=row.get("title") or row.get("patent_title") or "Untitled",
+                content_type="text/plain",
+                raw_text=row.get("text") or row.get("description") or row.get("abstract") or "",
+                metadata={"fetcher": "manual_upload"}
+            )
+            db.add_raw_document(doc)
+            db_row = db.connection.execute("SELECT id FROM raw_documents ORDER BY id DESC LIMIT 1").fetchone()
+            if db_row:
+                db.enqueue_raw_document(int(db_row["id"]))
+    elif filename.endswith(".jsonl"):
+        for line in text_content.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                doc = RawDocument(
+                    source_url=row.get("url") or row.get("source_url") or f"upload://{uuid.uuid4().hex[:8]}",
+                    source_type="bulk_jsonl",
+                    fetched_at=datetime.now(timezone.utc),
+                    title=row.get("title") or row.get("patent_title") or "Untitled",
+                    content_type="text/plain",
+                    raw_text=row.get("text") or row.get("description") or row.get("abstract") or "",
+                    metadata={"fetcher": "manual_upload"}
+                )
+                db.add_raw_document(doc)
+                db_row = db.connection.execute("SELECT id FROM raw_documents ORDER BY id DESC LIMIT 1").fetchone()
+                if db_row:
+                    db.enqueue_raw_document(int(db_row["id"]))
+            except json.JSONDecodeError:
+                pass
+    else:
+        source_type = "patent_html" if filename.endswith(".html") else "patent_txt"
+        doc = RawDocument(
+            source_url=f"upload://{filename}_{uuid.uuid4().hex[:8]}",
+            source_type=source_type,
+            fetched_at=datetime.now(timezone.utc),
+            title=filename,
+            content_type="text/html" if source_type == "patent_html" else "text/plain",
+            raw_text=text_content,
+            raw_html=text_content if source_type == "patent_html" else None,
+            metadata={"fetcher": "manual_upload"}
+        )
+        db.add_raw_document(doc)
+        row = db.connection.execute("SELECT id FROM raw_documents ORDER BY id DESC LIMIT 1").fetchone()
+        if row:
+            db.enqueue_raw_document(int(row["id"]))
+            
+    db.close()
+    return RedirectResponse(url="/", status_code=303)
+
 
 
 @app.get("/search", response_class=HTMLResponse)

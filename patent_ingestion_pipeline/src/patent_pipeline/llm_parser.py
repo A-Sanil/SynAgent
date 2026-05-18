@@ -105,12 +105,12 @@ class PatentLLMParser:
             "Extract exact structured synthesis data from the input. "
             "Return only valid JSON with no markdown and no extra text. "
             "If a field is unknown, use null or an empty list. "
-            "Focus on patent identifiers, titles, abstracts, inventors, assignees, "
-            "reaction steps, SMILES, reaction SMARTS, yields, temperatures, solvents, "
-            "catalysts, time, mechanism notes, and domain tags."
+            "CRITICAL: If the patent uses IUPAC chemical names instead of SMILES strings, you MUST translate those chemical names into SMILES strings for 'reactant_smiles' and 'product_smiles'. "
+            "Carefully extract detailed 'mechanism_text' (e.g., SN2, esterification) and 'notes' (safety, color changes, precipitation)."
         )
         user_prompt = f"""
 Extract structured patent chemistry data from this document.
+Find ALL distinct chemical reaction steps and list each one separately.
 
 Required JSON shape:
 {{
@@ -147,9 +147,6 @@ Document metadata:
 
 Raw text:
 {document.raw_text or ""}
-
-Raw HTML:
-{document.raw_html or ""}
 """.strip()
         return [
             {"role": "system", "content": system_prompt},
@@ -182,13 +179,17 @@ Raw HTML:
 
     def _extract_json(self, content: str) -> dict[str, Any]:
         content = content.strip()
-        if content.startswith("```"):
-            lines = content.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            content = "\n".join(lines).strip()
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            blocks = content.split("```")
+            if len(blocks) >= 3:
+                content = blocks[1].strip()
+        else:
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end != -1:
+                content = content[start:end+1]
         try:
             return json.loads(content)
         except json.JSONDecodeError as exc:
@@ -311,12 +312,12 @@ class GeminiLLMParser:
             "Extract exact structured synthesis data from the input. "
             "Return only valid JSON with no markdown and no extra text. "
             "If a field is unknown, use null or an empty list. "
-            "Focus on patent identifiers, titles, abstracts, inventors, assignees, "
-            "reaction steps, SMILES, reaction SMARTS, yields, temperatures, solvents, "
-            "catalysts, time, mechanism notes, and domain tags."
+            "CRITICAL: If the patent uses IUPAC chemical names instead of SMILES strings, you MUST translate those chemical names into SMILES strings for 'reactant_smiles' and 'product_smiles'. "
+            "Carefully extract detailed 'mechanism_text' (e.g., SN2, esterification) and 'notes' (safety, color changes, precipitation)."
         )
         user_prompt = f"""
 Extract structured patent chemistry data from this document.
+Find ALL distinct chemical reaction steps and list each one separately.
 
 Required JSON shape:
 {{
@@ -353,14 +354,11 @@ Document metadata:
 
 Raw text:
 {document.raw_text or ""}
-
-Raw HTML:
-{document.raw_html or ""}
 """.strip()
         return {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": {"temperature": 0},
+            "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
         }
 
     def _generate_content(self, payload: dict[str, Any]) -> str:

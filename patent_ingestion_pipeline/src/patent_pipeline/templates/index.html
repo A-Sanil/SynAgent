@@ -17,6 +17,13 @@
   <form method="post" action="/enqueue_all">
     <button type="submit">Enqueue All Raw Documents</button>
   </form>
+  
+  <form method="post" action="/upload_patent" enctype="multipart/form-data" class="card" style="margin-top: 12px; padding: 12px;">
+    <strong>Manual Patent / Bulk Dataset Upload</strong><br><br>
+    <p class="small">Upload HTML/TXT for single patents, or upload massive `.csv` or `.jsonl` sheets containing columns like <code>title</code> and <code>text</code> or <code>abstract</code> to queue thousands of patents at once.</p>
+    <input type="file" name="file" accept=".html,.txt,.xml,.csv,.jsonl">
+    <button type="submit">Upload and Parse</button>
+  </form>
   <div class="header card" style="margin-top:12px;align-items:center;">
     <div class="brand"><span class="logo"></span><div><h1>Patent Parser</h1><div class="small">Review queue</div></div></div>
     <div class="controls">
