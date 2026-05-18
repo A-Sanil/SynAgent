@@ -38,45 +38,55 @@ QUERIES = [
 
 EPMC_URL = (
     "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-    "?query={q}&resultType=core&pageSize=15&format=json"
+    "?query={q}&resultType=core&pageSize=25&cursorMark={cursor}&format=json"
 )
+PAGES_PER_QUERY = 4  # up to 100 results per query
 
 
-def fetch_epmc_papers(n_per_query: int = 15) -> list[dict]:
+def fetch_epmc_papers(n_per_query: int = 25) -> list[dict]:
     papers: list[dict] = []
     seen_ids: set[str] = set()
     for q in QUERIES:
-        url = EPMC_URL.format(q=urllib.parse.quote_plus(q))
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "SynAgent/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                data = json.loads(r.read())
-            results = data.get("resultList", {}).get("result", [])
-            for item in results:
-                pid = item.get("id") or item.get("pmid") or ""
-                if pid in seen_ids:
-                    continue
-                seen_ids.add(pid)
-                title = item.get("title", "")
-                abstract = item.get("abstractText", "")
-                if not abstract:
-                    continue
-                source_url = (
-                    item.get("doi") and f"https://doi.org/{item['doi']}"
-                ) or f"https://europepmc.org/article/MED/{pid}"
-                papers.append({
-                    "id": pid,
-                    "title": title,
-                    "abstract": abstract,
-                    "source_url": source_url,
-                    "source_type": "europepmc",
-                    "journal": item.get("journalTitle", ""),
-                    "date": item.get("firstPublicationDate", ""),
-                })
-                print(f"  [{len(papers):>3}] {title[:70].encode('ascii','replace').decode()}")
-        except Exception as exc:
-            print(f"  [WARN] Query failed ({q!r}): {exc}")
-        time.sleep(0.5)
+        cursor = "*"
+        for page in range(PAGES_PER_QUERY):
+            url = EPMC_URL.format(q=urllib.parse.quote_plus(q), cursor=urllib.parse.quote_plus(cursor))
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "SynAgent/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    data = json.loads(r.read())
+                results = data.get("resultList", {}).get("result", [])
+                if not results:
+                    break
+                for item in results:
+                    pid = item.get("id") or item.get("pmid") or ""
+                    if pid in seen_ids:
+                        continue
+                    seen_ids.add(pid)
+                    title = item.get("title", "")
+                    abstract = item.get("abstractText", "")
+                    if not abstract:
+                        continue
+                    source_url = (
+                        item.get("doi") and f"https://doi.org/{item['doi']}"
+                    ) or f"https://europepmc.org/article/MED/{pid}"
+                    papers.append({
+                        "id": pid,
+                        "title": title,
+                        "abstract": abstract,
+                        "source_url": source_url,
+                        "source_type": "europepmc",
+                        "journal": item.get("journalTitle", ""),
+                        "date": item.get("firstPublicationDate", ""),
+                    })
+                cursor = data.get("nextCursorMark", "")
+                if not cursor:
+                    break
+            except Exception as exc:
+                print(f"  [WARN] Query {q!r} page {page+1} failed: {exc}")
+                break
+            time.sleep(0.3)
+        print(f"  Fetched from {q!r}: {len(papers)} total so far")
+        time.sleep(0.3)
     return papers
 
 
