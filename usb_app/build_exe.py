@@ -1,26 +1,28 @@
 """
-Build ReactionDB.exe — run this once on your laptop.
-Output: usb_app/dist/ReactionDB.exe  (~30-50 MB single file)
-Then copy ReactionDB.exe to D:\SynAgent\
+Build ReactionDB.exe — run once to produce the standalone app.
+Output: usb_app/dist/ReactionDB.exe
+Then copy to D:\SynAgent\ReactionDB.exe
 
 Usage:
-    cd C:\...\SynAgent
-    python usb_app/build_exe.py
+    cd C:\\...\\SynAgent
+    python usb_app\\build_exe.py
 """
 import subprocess, sys, os
 
-script = os.path.join(os.path.dirname(__file__), "synagent_db.py")
-dist   = os.path.join(os.path.dirname(__file__), "dist")
+HERE   = os.path.dirname(os.path.abspath(__file__))
+script = os.path.join(HERE, "synagent_db.py")
+dist   = os.path.join(HERE, "dist")
+build  = os.path.join(HERE, "build")
 
 cmd = [
     sys.executable, "-m", "PyInstaller",
-    "--onefile",            # single .exe
-    "--noconsole",          # no black CMD window (use tkinter window instead)
+    "--onefile",
+    "--noconsole",
     "--name", "ReactionDB",
     "--distpath", dist,
-    "--workpath", os.path.join(os.path.dirname(__file__), "build"),
-    "--specpath", os.path.dirname(__file__),
-    # Hidden imports FastAPI/uvicorn need
+    "--workpath", build,
+    "--specpath", HERE,
+    # FastAPI / uvicorn
     "--hidden-import", "uvicorn.logging",
     "--hidden-import", "uvicorn.loops",
     "--hidden-import", "uvicorn.loops.auto",
@@ -31,24 +33,30 @@ cmd = [
     "--hidden-import", "uvicorn.protocols.websockets.auto",
     "--hidden-import", "uvicorn.lifespan",
     "--hidden-import", "uvicorn.lifespan.on",
-    "--hidden-import", "fastapi",
-    "--hidden-import", "anyio",
     "--hidden-import", "anyio._backends._asyncio",
-    "--hidden-import", "starlette",
     "--hidden-import", "starlette.routing",
+    # PySide6 WebEngine
+    "--hidden-import", "PySide6.QtWebEngineWidgets",
+    "--hidden-import", "PySide6.QtWebEngineCore",
+    "--hidden-import", "PySide6.QtWebChannel",
+    "--hidden-import", "PySide6.QtNetwork",
+    "--hidden-import", "PySide6.QtCore",
+    "--hidden-import", "PySide6.QtGui",
+    "--hidden-import", "PySide6.QtWidgets",
+    # Collect all PySide6 data files (needed for WebEngine)
+    "--collect-all", "PySide6",
     script,
 ]
 
-print("Building ReactionDB.exe ...")
-print("This takes 1-3 minutes.\n")
+print("Building ReactionDB.exe (PySide6 embedded browser - ~200 MB) ...")
+print("This takes 3-5 minutes.\n")
 result = subprocess.run(cmd)
 
 if result.returncode == 0:
     exe = os.path.join(dist, "ReactionDB.exe")
     size_mb = os.path.getsize(exe) / 1024 / 1024
-    print(f"\n✅  Built: {exe}  ({size_mb:.0f} MB)")
-    print(f"\nNext: Copy ReactionDB.exe to D:\\SynAgent\\")
-    print(f"Then double-click it from the USB on any Windows laptop.")
+    print(f"\nBUILT: {exe}  ({size_mb:.0f} MB)")
+    print(f"\nCopy to USB:  copy \"{exe}\" D:\\SynAgent\\ReactionDB.exe")
 else:
-    print("\n❌  Build failed — check errors above.")
+    print("\nBuild FAILED — check errors above.")
     sys.exit(1)
