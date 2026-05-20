@@ -1,20 +1,27 @@
 """
 SynAgent Reaction Database — Standalone Desktop App
 ====================================================
-Double-click ReactionDB.exe to launch. No browser, no installation needed.
-The DB is found automatically next to the EXE on the USB drive.
+Works on Windows (.exe) and macOS (.app). No browser, no internet needed.
+The DB is found automatically next to the binary on the USB drive.
 """
 from __future__ import annotations
 
 import io
 import json
 import os
+import signal
 import sqlite3
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+# Embedded Tailwind JS (offline — no CDN needed)
+try:
+    from _tailwind_data import TAILWIND_JS
+except ImportError:
+    TAILWIND_JS = b""  # fallback — UI still works, just unstyled
 
 # ── Path detection (frozen .exe OR plain .py) ────────────────────────────────
 if getattr(sys, "frozen", False):
@@ -234,7 +241,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>SynAgent</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="/tailwind.js"></script>
 <style>
   *{box-sizing:border-box;-webkit-user-select:none;user-select:none}
   input,textarea{-webkit-user-select:text!important;user-select:text!important}
@@ -270,7 +277,8 @@ HTML = r"""<!DOCTYPE html>
   <span class="text-slate-600 text-xs ml-2">Reaction Database</span>
   <div class="flex-1"></div>
   <a href="/api/export.csv" class="nodrag text-xs px-3 py-1 rounded border border-[#21293d] text-slate-400 hover:text-white hover:border-teal-700 transition-colors mr-2">⬇ Export CSV</a>
-  <span id="db-badge" class="nodrag text-xs text-slate-600 hidden lg:block"></span>
+  <span id="db-badge" class="nodrag text-xs text-slate-600 hidden lg:block mr-3"></span>
+  <button onclick="shutdown()" class="nodrag text-xs px-3 py-1 rounded border border-[#3d2121] text-red-700 hover:text-red-400 hover:border-red-700 transition-colors font-semibold" title="Shut down and close app">⏻ Quit</button>
 </div>
 
 <!-- Tabs -->
@@ -518,11 +526,31 @@ function esc(s){if(!s)return'';return String(s).replace(/\\/g,'\\\\').replace(/'
 function $(id){return document.getElementById(id);}
 function resetSearch(){$('s-q').value='';document.querySelector('input[name=src][value=all]').checked=true;$('s-miny').value='';$('s-maxy').value='';$('s-conf').value=0;$('conf-val').textContent='0.0';$('s-solvent').value='';$('s-catalyst').value='';$('s-sort').value='confidence';doSearch(1);}
 
+async function shutdown(){
+  if(!confirm('Shut down SynAgent and close the app?')) return;
+  try { await fetch('/api/shutdown', {method:'POST'}); } catch(e){}
+  document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0d1117;color:#475569;font-family:system-ui;font-size:1rem">App closed. You can close this window.</div>';
+}
+
 fetch('/api/stats').then(r=>r.json()).then(s=>{if(s.db_path)$('db-badge').textContent=s.db_path;$('db-badge').classList.remove('hidden');});
 doSearch(1);
 </script>
 </body>
 </html>"""
+
+@api.get("/tailwind.js")
+def serve_tailwind():
+    from fastapi.responses import Response
+    return Response(content=TAILWIND_JS, media_type="application/javascript")
+
+@api.post("/api/shutdown")
+def api_shutdown():
+    """Gracefully shut down the server and close the app."""
+    def _kill():
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_kill, daemon=True).start()
+    return {"ok": True}
 
 @api.get("/", response_class=HTMLResponse)
 def index():
