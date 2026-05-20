@@ -49,9 +49,23 @@ def _find_db() -> Optional[Path]:
     candidates = [
         os.environ.get("PATENT_DATA_DIR"),
         str(BASE_DIR),
+        # Windows USB drive letters
         r"D:\SynAgent", r"E:\SynAgent", r"F:\SynAgent", r"G:\SynAgent",
         str(Path(__file__).parent.parent / "patent_ingestion_pipeline" / "data"),
     ]
+
+    # macOS: check all mounted volumes for the db
+    if sys.platform == "darwin":
+        import glob
+        for vol_db in glob.glob("/Volumes/*/db/patent_pipeline.db"):
+            if Path(vol_db).exists():
+                return Path(vol_db)
+        # macOS .app bundle: exe is at App.app/Contents/MacOS/SynAgent
+        # go up 3 levels to reach the folder containing the .app
+        if getattr(sys, "frozen", False):
+            app_container = Path(sys.executable).parent.parent.parent.parent
+            candidates.insert(0, str(app_container))
+
     for c in candidates:
         if not c:
             continue
