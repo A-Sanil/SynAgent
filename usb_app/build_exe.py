@@ -2,12 +2,12 @@
 Build ReactionDB — works on Windows (.exe) and macOS (.app).
 Run this script ON EACH PLATFORM to produce the binary for that platform.
 
-Windows:  python usb_app\\build_exe.py   → usb_app/dist/ReactionDB.exe  (~274 MB)
-macOS:    python usb_app/build_exe.py    → usb_app/dist/ReactionDB       (~280 MB)
+Windows:  python usb_app\\build_exe.py   → usb_app/dist/SynAgent.exe  (~274 MB)
+macOS:    python usb_app/build_exe.py    → usb_app/dist/SynAgent       (~280 MB)
 
 Then copy the output to the USB:
-  Windows: copy dist\\ReactionDB.exe  D:\\SynAgent\\ReactionDB.exe
-  macOS:   cp dist/ReactionDB         /Volumes/SynAgent/ReactionDB
+  Windows: copy dist\\SynAgent.exe  D:\\SynAgent\\SynAgent.exe
+  macOS:   cp dist/SynAgent         /Volumes/SynAgent/SynAgent
 """
 import subprocess, sys, os, platform
 
@@ -17,7 +17,7 @@ dist   = os.path.join(HERE, "dist")
 build  = os.path.join(HERE, "build")
 IS_MAC = platform.system() == "Darwin"
 
-name = "ReactionDB"
+name = "SynAgent"
 
 cmd = [
     sys.executable, "-m", "PyInstaller",
@@ -72,7 +72,7 @@ if result.returncode == 0:
         out = os.path.join(dist, name + ".exe")
         size_mb = os.path.getsize(out) / 1024 / 1024
         print(f"\nBuilt: {out}  ({size_mb:.0f} MB)")
-        print(f"\nCopy to USB:  copy \"{out}\" D:\\SynAgent\\ReactionDB.exe")
+        print(f"\nCopy to USB:  copy \"{out}\" D:\\SynAgent\\SynAgent.exe")
 else:
     print("\nBuild FAILED — check errors above.")
     sys.exit(1)
