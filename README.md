@@ -1,320 +1,193 @@
-# SynAgent
+# Chemical Reaction DB & Pipeline
 
-**Agent-driven retrosynthesis route validation, evaluation, and optimization.**
+**Python · RDKit · SQLite · XGBoost · LLM · Open Reaction Database**
 
-An agentic framework that integrates with [SynLlama](https://github.com/THGLab/SynLlama) to validate synthetic pathways, assess building block availability and cost, compute route hazard scores, and lookup experimental precedent.
+A full-stack cheminformatics pipeline spanning patent scraping, reaction database construction, two-stage SMILES validation, and an ML yield predictor trained on 414,000+ reactions.
 
 <div align="center">
-  <img src="assets/synagent.png" width="66%">
+  <img src="assets/synagent.png" width="60%">
 </div>
 
-## Overview
+---
 
-SynAgent takes retrosynthesis predictions from SynLlama and provides a comprehensive evaluation pipeline:
+## Highlights
 
-1. **Validation** — checks reaction SMILES/SMARTS, building blocks, and intermediate molecules for chemical correctness
-2. **Availability & Pricing** — searches ChemSpace for building block cost and procurement status
-3. **Hazard Assessment** — fetches GHS hazard data from PubChem and computes route-level safety scores
-4. **Precedent Lookup** — queries the Open Reaction Database for experimental evidence
+- **414,000+ reactions** ingested from the Open Reaction Database (ORD) via HuggingFace streaming
+- **Async patent crawler** scraping Google Patents with LLM-structured JSON parsing for chemistry extraction
+- **Two-stage SMILES validation** — RDKit canonicalization + PubChem cross-referencing with confidence scoring, auto-queuing low-confidence records for active learning review
+- **XGBoost yield predictor** (v2): MAE **13.76%**, R² **0.499**, trained on DRFP reaction fingerprints with GPU-accelerated Optuna hyperparameter search
+- **Reaction-type clustering** — k=20 KMeans on PCA-compressed fingerprints; best specialist cluster achieves MAE **4.5%**, R² **0.931**
+- **Conformal prediction** — calibrated 80/90/95% coverage intervals with finite-sample guarantees
 
-All agents run **in parallel** for fast route evaluation. The system avoids burning LLM tokens by using direct API calls for chemistry data.
+---
 
-## Quick Start
+## Tech Stack
 
-### Installation
+| Layer | Tools |
+|-------|-------|
+| Data ingestion | HuggingFace `datasets`, async `aiohttp`, SQLite |
+| Chemistry | RDKit, DRFP (Differential Reaction Fingerprints), PubChem API |
+| ML | XGBoost (GPU/CUDA), scikit-learn, Optuna (30-trial × 5-fold CV) |
+| Validation | LLM-structured JSON prompts, PubChem confidence scoring |
+| Agents | Google Gemini, asyncio, Pydantic |
+| Visualization | Matplotlib (dark-theme result charts) |
 
-```sh
-# Clone the repo
-git clone https://github.com/yourusername/SynAgent.git
-cd SynAgent
+---
 
-# Setup virtual environment
-python3 -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+## What This Does
 
-# Install dependencies
+### 1. Data Pipeline
+
+```
+Google Patents (async crawler)
+        +
+Open Reaction Database (HuggingFace streaming)
+        |
+        v
+[LLM-structured JSON parsing]   <- extracts SMILES, conditions, yields
+        |
+        v
+[Two-stage validation]
+  Stage 1: RDKit canonicalization  -> flags invalid SMILES
+  Stage 2: PubChem cross-reference -> confidence scoring
+  Low-confidence records -> active learning review queue
+        |
+        v
+[SQLite: ord_full.db]  -- 414,667 reactions with yield
+  + reaction_fp column  -- pre-computed DRFP blobs (2048-bit)
+```
+
+### 2. Yield Prediction
+
+Reactions are encoded as **DRFP (Differential Reaction Fingerprints)** — 2048-bit binary vectors representing the structural transformation as the symmetric difference of circular atom-environment n-grams. Combined with reaction conditions (temperature, time, catalyst, solvent) into a 2174-feature vector fed to XGBoost.
+
+**Training setup:**
+- 80/10/10 train/val/test split (331k / 41k / 41k), seed=42
+- Optuna: 30 trials × 5-fold CV on 50k subsample for hyperparameter search
+- GPU training (CUDA, XGBoost hist method)
+- Manual split-conformal prediction for calibrated uncertainty intervals
+
+**Results:**
+
+| Model | Trees | MAE | R² |
+|-------|-------|-----|-----|
+| v1 | 10,000 | 14.78% | 0.467 |
+| **v2** | **20,000** | **13.76%** | **0.499** |
+
+| Yield range | MAE | RMSE |
+|-------------|-----|------|
+| High (70–100%) | 12.9% | 16.7% |
+| Mid (30–70%) | **11.5%** | 15.3% |
+| Low (5–30%) | 22.1% | 28.6% |
+
+### 3. Route Evaluation Agents
+
+Parallel agent system for evaluating retrosynthesis routes from [SynLlama](https://github.com/THGLab/SynLlama):
+
+| Agent | What it does |
+|-------|-------------|
+| **validation** | RDKit SMILES + reaction SMARTS correctness check |
+| **chemspace** | Building block pricing and availability (ChemSpace API) |
+| **hazard** | GHS hazard codes per compound, route-level safety score (PubChem) |
+| **precedent** | Experimental evidence lookup in ORD |
+| **master** | Orchestrates all agents via `asyncio.gather()` |
+
+---
+
+## Repository Structure
+
+```
+.
++-- Agent tools/
+|   +-- download_ord.py          # ORD bulk ingest via HuggingFace streaming
+|   +-- precalc_fingerprints.py  # Pre-compute DRFP blobs into SQLite
+|   +-- train_xgboost.py         # Train yield predictor (Optuna + GPU)
+|   +-- extend_xgboost.py        # Continue training from checkpoint
+|   +-- reaction_clusters.py     # Cluster-specialized models (k=20)
+|   +-- validate_similarity.py   # Fingerprint validation utilities
+|
++-- patent_ingestion_pipeline/
+|   +-- src/patent_pipeline/
+|       +-- collector_pdf.py     # Async patent PDF crawler
+|       +-- chem_ner.py          # LLM chemistry extraction (structured JSON)
+|       +-- pubchem.py           # PubChem confidence scoring
+|
++-- src/synagent/
+|   +-- agents/                  # Parallel route evaluation agents
+|   +-- models.py                # Pydantic schemas
+|   +-- chemspacetool.py         # ChemSpace API client
+|
++-- data/                        # Reaction templates, sample outputs
++-- requirements.txt
++-- pyproject.toml
+```
+
+---
+
+## Setup
+
+```bash
+git clone https://github.com/A-Sanil/SynAgent-Database-and-Scraping-Pipeline.git
+cd SynAgent-Database-and-Scraping-Pipeline
+
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# (Optional) If you have uv installed
-uv sync
+cp .env.sample .env  # add CHEMSPACE_API_KEY, GOOGLE_API_KEY
 ```
 
-### Environment Setup
-
-Create a `.env` file in the root directory:
+### Run Yield Predictor
 
 ```bash
-CHEMSPACE_API_KEY=your_chemspace_api_key_here
-GOOGLE_API_KEY=your_google_gemini_api_key_here
+# Step 1: Build fingerprints (one-time)
+python "Agent tools/precalc_fingerprints.py" --db path/to/ord_full.db
+
+# Step 2: Train with GPU + Optuna
+python "Agent tools/train_xgboost.py" --db path/to/ord_full.db --gpu --optuna
+
+# Step 3: Extend training from checkpoint
+python "Agent tools/extend_xgboost.py" --gpu --extra_rounds 10000
+
+# Step 4: Reaction clustering analysis
+python "Agent tools/reaction_clusters.py" --db path/to/ord_full.db --k 20
 ```
 
-### Verify Installation
+### Run Route Evaluation
 
 ```bash
-synagent --help
+synagent eval data/synllama_output.csv   # validate chemistry
+synagent run  data/routes.csv master     # full evaluation (all agents)
+synagent serve master --port 8000        # serve as API
 ```
 
-## Usage
+---
 
-### 1. Validate a Route (JSON response from SynLlama)
-
-```bash
-synagent eval data/synllama_output.csv --output_dir data/
-```
-
-This validates each JSON response in a CSV file. Outputs:
-- `synllama-raw-valid.csv` — rows with valid routes
-- `synllama-raw-failed.csv` — rows with validation errors
-
-### 2. Run Route Evaluation
-
-```bash
-synagent run data/routes.csv master --output output.jsonl
-```
-
-This processes each row through the master orchestrator agent. Results are written as JSONL.
-
-### 3. Serve an Agent via API
-
-```bash
-synagent serve master --host 127.0.0.1 --port 8000
-```
-
-Start a web server for interactive agent queries. Post JSON to `http://localhost:8000/run`.
-
-## Workflow: SynLlama → SynAgent
-
-### Step 1: Generate routes with SynLlama
-
-```python
-from synllama import SynLlamaModel
-
-model = SynLlamaModel.from_pretrained("synllama-7b")
-routes = model.retrosynthesis(target_smiles="CCO")
-# Returns: reactions, building blocks, scores
-```
-
-### Step 2: Format for SynAgent
-
-Convert SynLlama output to SynAgent schema (JSON with `reactions` and `building_blocks`):
+## Hyperparameters (Optuna Best)
 
 ```json
 {
-  "building_blocks": ["CCO", "CC(=O)O"],
-  "reactions": [
-    {
-      "reaction_number": 1,
-      "reaction_template": "[C:1][OH].[C:2][C:3](=[O])>>[C:1][O][C:2][C:3]",
-      "reactants": ["CCO", "CC(=O)O"],
-      "product": "CCOC(=O)C"
-    }
-  ]
+  "learning_rate": 0.01594,
+  "max_depth": 10,
+  "subsample": 0.676,
+  "colsample_bytree": 0.631,
+  "min_child_weight": 4,
+  "gamma": 0.633,
+  "reg_alpha": 0.000914,
+  "reg_lambda": 0.531
 }
 ```
 
-### Step 3: Validate and evaluate
+---
 
-```bash
-# Validate route chemistry
-synagent eval routes.csv
+## Environment Variables
 
-# Run full evaluation (validation + pricing + hazard + precedent)
-synagent run routes.csv master --output results.jsonl
-```
+| Variable | Required for |
+|----------|-------------|
+| `CHEMSPACE_API_KEY` | Building block pricing agent |
+| `GOOGLE_API_KEY` | LLM-based chemistry extraction + route evaluation |
 
-## Architecture
-
-### Agents
-
-| Agent | Purpose | Data Source |
-|-------|---------|-------------|
-| **validation** | Checks SMILES validity, reaction correctness | RDKit (local) |
-| **chemspace** | Looks up building block pricing and availability | ChemSpace API |
-| **optimization** | Fetches GHS hazard codes, computes route safety | PubChem API + local scoring |
-| **ord** | Finds experimental precedent for reactions | ORD (Open Reaction Database) |
-| **master** | Orchestrates all agents in parallel | Coordinates above |
-
-### Data Flow
-
-```
-SynLlama Output
-    ↓
-[SMILES, Reactions]
-    ↓
-    ├─→ [validation agent]     → Chemical correctness
-    ├─→ [chemspace agent]      → Building block prices
-    ├─→ [optimization agent]   → Hazard scores (PubChem)
-    └─→ [ord agent]            → Experimental evidence
-    ↓
-[Merged Report]
-```
-
-### Key Design Decisions
-
-- **Async / Parallel execution**: All agents run concurrently via `asyncio.gather()`
-- **Zero LLM tokens for chemistry data**: PubChem and ChemSpace are queried directly via HTTP
-- **Structured outputs**: Each agent returns JSON with hazard codes, prices, and confidence scores
-- **Pydantic schemas**: Strict type validation for all data models
-
-## Configuration
-
-### Required Environment Variables
-
-- `CHEMSPACE_API_KEY` — API key for ChemSpace compound search
-- `GOOGLE_API_KEY` — API key for Google Gemini models
-
-### Optional Settings
-
-Edit `pyproject.toml` or override at runtime:
-- Python version: ≥ 3.13
-- Gemini model: defaults to `gemini-3-flash-preview`
-- Hazard gamma: weight on worst-compound hazard (0 to 1, default 0.6)
-
-## Examples
-
-### Full Route Evaluation
-
-Input: a CSV with a `response` column containing JSON route data.
-
-```python
-import asyncio
-from synagent.agents import get_agent
-
-async def main():
-    agent = get_agent("master")
-    result = await agent.run("""
-    Please fully evaluate this synthetic route:
-    target: CCO
-    reactions: [...]
-    building_blocks: [...]
-    """)
-    print(result.output)
-
-asyncio.run(main())
-```
-
-### Direct Hazard Scoring
-
-```python
-from synagent.agents.optimization import score_route_hazard
-
-smiles_list = ["CCO", "CC(=O)O", "CCOC(=O)C"]
-result = await score_route_hazard(
-    smiles_list=smiles_list,
-    compound_names=["ethanol", "acetic acid", "ethyl acetate"],
-    gamma=0.6
-)
-print(f"Route hazard: {result['route_hazard']}")
-print(f"Red flags: {result['has_red_flag']}")
-```
-
-## Data Models
-
-### SynLlama Input Format
-
-```python
-class SynLlamaReaction(BaseModel):
-    reaction_number: int
-    reaction_template: str  # SMARTS
-    reactants: List[str]    # SMILES
-    product: str            # SMILES
-
-class SynLlamaFormat(BaseModel):
-    reactions: List[SynLlamaReaction]
-    building_blocks: List[str]
-```
-
-### SynAgent Output Format
-
-```python
-class ReactionResult(BaseModel):
-    reaction_number: int
-    reaction_template: str
-    reactant_smiles: List[str]
-    expected_product: str
-    actual_products: List[str]
-    status: Literal["passed", "failed"]
-    failure_mode: str | None
-
-class SynLlamaReport(BaseModel):
-    reactions: List[ReactionResult]
-    building_blocks: List[...]
-    all_building_blocks_valid: bool
-    all_reactions_passed: bool
-```
-
-## Testing
-
-Validate chemistry on a sample route:
-
-```bash
-synagent eval data/test_routes.csv
-```
-
-Check for errors:
-- `json` — malformed JSON response
-- `smiles` — invalid SMILES strings
-- `reactant` — reactants don't match template
-- `reaction` — reaction produced no products
-- `product` — expected product not formed
-
-## Performance & Token Efficiency
-
-| Task | LLM Tokens | Data Lookups |
-|------|-----------|--------------|
-| Validation | ~100 | RDKit only |
-| PubChem hazard | ~50 | 1 HTTP call per compound |
-| ChemSpace pricing | ~50 | 1 HTTP call per SMILES |
-| Full route eval | ~200 | All in parallel |
-
-**vs. naive LLM approach**: ~5000 tokens to manually describe all chemistry.
-
-## Troubleshooting
-
-### "CHEMSPACE_API_KEY is missing"
-Set environment variable or pass `api_key` explicitly:
-```python
-mgr = ChemspaceTokenManager(api_key="...")
-```
-
-### "No PubChem data found for SMILES"
-The compound may not be in PubChem. Optimization agent will flag this and return empty hazard codes.
-
-### "Reaction produced no products"
-The provided reactants do not satisfy the reaction SMARTS. Check SMILES validity and template.
-
-## Contributing
-
-Contributions welcome! Areas of improvement:
-- Additional hazard scoring methods (NIOSH, ECHA)
-- Integration with USPTO patent data
-- Human-in-the-loop approval workflows
-- Cost model refinement
-
-## Citation
-
-If you use SynAgent with SynLlama, please cite:
-
-```bibtex
-@software{synagent2024,
-  title={SynAgent: Agent-Driven Retrosynthesis Route Validation},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/yourusername/SynAgent}
-}
-
-@article{synllama2024,
-  title={SynLlama: Retrosynthesis Prediction with Fine-Tuned Large Language Models},
-  author={THGLab},
-  year={2024},
-  url={https://github.com/THGLab/SynLlama}
-}
-```
+---
 
 ## License
 
 MIT
-
-## Contact
-
-Questions or issues? Open a GitHub issue or contact the maintainers.
