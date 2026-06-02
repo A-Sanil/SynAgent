@@ -91,17 +91,23 @@ def db_stats() -> dict:
         avg_r    = conn.execute("SELECT AVG(yield_percent) FROM reactions WHERE yield_percent IS NOT NULL").fetchone()[0]
         solvents = conn.execute("SELECT COUNT(DISTINCT solvent) FROM reactions WHERE solvent IS NOT NULL AND solvent!=''").fetchone()[0]
         cats     = conn.execute("SELECT COUNT(DISTINCT catalyst) FROM reactions WHERE catalyst IS NOT NULL AND catalyst!=''").fetchone()[0]
+        class_rows = conn.execute(
+            "SELECT reaction_class, COUNT(*) as n FROM reactions "
+            "WHERE reaction_class IS NOT NULL GROUP BY reaction_class ORDER BY n DESC"
+        ).fetchall()
+        classes = {r[0]: r[1] for r in class_rows}
         return dict(total=total, ord=ord_c, patent=patent_c,
                     high_confidence=hi, with_yield=yld,
                     avg_yield=round(avg_r, 1) if avg_r else None,
                     distinct_solvents=solvents, distinct_catalysts=cats,
+                    reaction_classes=classes,
                     db_path=str(db))
     finally:
         conn.close()
 
 def db_search(q="", source="all", min_yield=None, max_yield=None,
               min_confidence=0.0, solvent="", catalyst="",
-              sort="confidence", page=1, page_size=25) -> dict:
+              reaction_class="", sort="confidence", page=1, page_size=25) -> dict:
     db = _find_db()
     if not db:
         return {"error": "Database not found"}
@@ -142,6 +148,8 @@ def db_search(q="", source="all", min_yield=None, max_yield=None,
             conds.append("r.solvent LIKE ?"); params.append(f"%{solvent.strip()}%")
         if catalyst.strip():
             conds.append("r.catalyst LIKE ?"); params.append(f"%{catalyst.strip()}%")
+        if reaction_class.strip() and reaction_class.strip() != "all":
+            conds.append("r.reaction_class=?"); params.append(reaction_class.strip())
 
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         sort_map = {
@@ -212,7 +220,7 @@ def db_yield_dist() -> dict:
     finally:
         conn.close()
 
-def db_export_csv(q="", source="all", min_yield=None, min_confidence=0.0) -> bytes:
+def db_export_csv(q="", source="all", min_yield=None, min_confidence=0.0, reaction_class="") -> bytes:
     db = _find_db()
     if not db:
         return b"error,Database not found\n"
@@ -234,14 +242,16 @@ def db_export_csv(q="", source="all", min_yield=None, min_confidence=0.0) -> byt
             conds.append("yield_percent>=?"); params.append(float(min_yield))
         if float(min_confidence) > 0:
             conds.append("confidence>=?"); params.append(float(min_confidence))
+        if reaction_class.strip() and reaction_class.strip() != "all":
+            conds.append("reaction_class=?"); params.append(reaction_class.strip())
         where = ("WHERE " + " AND ".join(conds)) if conds else ""
         rows = conn.execute(
-            f"SELECT reaction_id,source,confidence,reaction_smarts,product_smiles,"
+            f"SELECT reaction_id,source,reaction_class,confidence,reaction_smarts,product_smiles,"
             f"yield_percent,temperature_celsius,solvent,catalyst,notes "
             f"FROM reactions {where} ORDER BY confidence DESC LIMIT 10000", params
         ).fetchall()
         buf = io.StringIO()
-        buf.write("reaction_id,source,confidence,reaction_smarts,product_smiles,yield_percent,temperature_celsius,solvent,catalyst,notes\n")
+        buf.write("reaction_id,source,reaction_class,confidence,reaction_smarts,product_smiles,yield_percent,temperature_celsius,solvent,catalyst,notes\n")
         for row in rows:
             buf.write(",".join(
                 f'"{str(v).replace(chr(34), chr(39))}"' if v is not None else ""
@@ -337,6 +347,25 @@ HTML = r"""<!DOCTYPE html>
         <div><p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Solvent</p><input id="s-solvent" type="text" placeholder="e.g. water" class="w-full"></div>
         <div><p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Catalyst</p><input id="s-catalyst" type="text" placeholder="e.g. palladium" class="w-full"></div>
         <div>
+          <p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Reaction Type</p>
+          <select id="s-class" class="w-full text-xs">
+            <option value="">All Types</option>
+            <option value="Amide Formation">Amide Formation</option>
+            <option value="N-Alkylation &amp; N-Arylation">N-Alkylation &amp; N-Arylation</option>
+            <option value="Suzuki &amp; Cross-Coupling">Suzuki &amp; Cross-Coupling</option>
+            <option value="Reductive Amination">Reductive Amination</option>
+            <option value="Urea &amp; Thiourea Formation">Urea &amp; Thiourea Formation</option>
+            <option value="Sulfonamide Formation">Sulfonamide Formation</option>
+            <option value="Thiazole &amp; Thiadiazole">Thiazole &amp; Thiadiazole</option>
+            <option value="Pyrazole &amp; Triazole &amp; Tetrazole">Pyrazole &amp; Triazole &amp; Tetrazole</option>
+            <option value="Oxazole &amp; Isoxazole &amp; Oxadiazole">Oxazole &amp; Isoxazole &amp; Oxadiazole</option>
+            <option value="Pyridine, Quinoline &amp; Dihydropyridine">Pyridine, Quinoline &amp; Dihydropyridine</option>
+            <option value="Benzimidazole, Indole &amp; Purine">Benzimidazole, Indole &amp; Purine</option>
+            <option value="Functional Group Interconversion">Functional Group Interconversion</option>
+            <option value="Other">Other / Unclassified</option>
+          </select>
+        </div>
+        <div>
           <p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Sort</p>
           <select id="s-sort" class="w-full"><option value="confidence">Confidence</option><option value="yield">Yield</option><option value="temperature">Temp</option></select>
         </div>
@@ -357,6 +386,22 @@ HTML = r"""<!DOCTYPE html>
   <div class="flex items-center gap-2 mb-3 flex-wrap">
     <input id="b-q" type="text" placeholder="Quick filter..." class="w-52 text-sm" onkeydown="if(event.key==='Enter')doBrowse(1)">
     <select id="b-src" class="text-sm"><option value="all">All</option><option value="ord">ORD</option><option value="patent">Patent</option></select>
+    <select id="b-class" class="text-sm">
+      <option value="">All Types</option>
+      <option value="Amide Formation">Amide Formation</option>
+      <option value="N-Alkylation & N-Arylation">N-Alkylation &amp; N-Arylation</option>
+      <option value="Suzuki & Cross-Coupling">Suzuki &amp; Cross-Coupling</option>
+      <option value="Reductive Amination">Reductive Amination</option>
+      <option value="Urea & Thiourea Formation">Urea &amp; Thiourea</option>
+      <option value="Sulfonamide Formation">Sulfonamide</option>
+      <option value="Thiazole & Thiadiazole">Thiazole</option>
+      <option value="Pyrazole & Triazole & Tetrazole">Pyrazole/Triazole</option>
+      <option value="Oxazole & Isoxazole & Oxadiazole">Oxazole</option>
+      <option value="Pyridine, Quinoline & Dihydropyridine">Pyridine/Quinoline</option>
+      <option value="Benzimidazole, Indole & Purine">Benzimidazole/Indole</option>
+      <option value="Functional Group Interconversion">FGI</option>
+      <option value="Other">Other</option>
+    </select>
     <select id="b-sort" class="text-sm"><option value="confidence">Confidence</option><option value="yield">Yield</option><option value="id">Row ID</option></select>
     <select id="b-ps" class="text-sm"><option value="25">25/page</option><option value="50">50/page</option><option value="100">100/page</option></select>
     <button onclick="doBrowse(1)" class="px-3 py-1.5 rounded-lg text-xs text-white font-bold" style="background:#4f46e5">Filter</button>
@@ -407,6 +452,11 @@ HTML = r"""<!DOCTYPE html>
     <h3 class="font-bold text-white mb-3 text-sm">Coverage</h3>
     <div id="source-bars" class="space-y-2.5"></div>
   </div>
+  <div class="card rounded-xl p-4 mt-3">
+    <h3 class="font-bold text-white mb-1 text-sm">Reaction Types <span class="text-slate-500 font-normal text-xs">(click to filter)</span></h3>
+    <p class="text-xs text-slate-600 mb-3">Classified against SynLlama 115 templates</p>
+    <div id="class-bars" class="space-y-2"></div>
+  </div>
 </div>
 
 <!-- Detail modal -->
@@ -448,6 +498,7 @@ async function doSearch(page){
   if($('s-maxy').value)p.set('max_yield',$('s-maxy').value);
   if($('s-solvent').value.trim())p.set('solvent',$('s-solvent').value.trim());
   if($('s-catalyst').value.trim())p.set('catalyst',$('s-catalyst').value.trim());
+  if($('s-class').value)p.set('reaction_class',$('s-class').value);
   $('s-results').innerHTML='<p class="text-slate-500 text-xs text-center py-8">Searching...</p>';
   const d=await api('/api/search?'+p);
   if(d.error){$('s-results').innerHTML=`<div class="card rounded-xl p-4 text-red-400 text-xs">Error: ${d.error}</div>`;return;}
@@ -476,7 +527,8 @@ function card(r){
 async function doBrowse(page){
   bPage=page||1;
   const ps=parseInt($('b-ps').value)||25;
-  const d=await api(`/api/search?q=${encodeURIComponent($('b-q').value.trim())}&source=${$('b-src').value}&sort=${$('b-sort').value}&page=${bPage}&page_size=${ps}`);
+  const rc=encodeURIComponent($('b-class').value);
+  const d=await api(`/api/search?q=${encodeURIComponent($('b-q').value.trim())}&source=${$('b-src').value}&reaction_class=${rc}&sort=${$('b-sort').value}&page=${bPage}&page_size=${ps}`);
   if(d.error)return;
   $('b-count').textContent=`${d.total.toLocaleString()} reactions`;
   const off=(bPage-1)*ps;
@@ -533,6 +585,11 @@ async function loadStats(){
   $('d-details').innerHTML=[['High Confidence ≥0.6',s.high_confidence?.toLocaleString()],['Avg Yield',s.avg_yield!=null?s.avg_yield+'%':'—'],['Solvents',s.distinct_solvents?.toLocaleString()],['Catalysts',s.distinct_catalysts?.toLocaleString()]].map(([k,v])=>`<div class="flex justify-between text-xs"><span class="text-slate-500">${k}</span><span class="text-white font-semibold">${v}</span></div>`).join('');
   const tot=s.total||1;
   $('source-bars').innerHTML=[['ORD Expert',s.ord,'4ade80'],['Patent LLM',s.patent,'c084fc'],['High Confidence',s.high_confidence,'38bdf8'],['With Yield',s.with_yield,'fb923c']].map(([l,v,c])=>`<div><div class="flex justify-between text-xs text-slate-400 mb-1"><span>${l}</span><span style="color:#${c}">${v?.toLocaleString()||0}</span></div><div class="h-1.5 rounded-full" style="background:#1e2a3a"><div class="h-full rounded-full" style="background:#${c};width:${Math.round((v/tot)*100)}%"></div></div></div>`).join('');
+  if(s.reaction_classes){
+    const cls=s.reaction_classes;const clsMax=Math.max(...Object.values(cls),1);
+    const colors={'Suzuki & Cross-Coupling':'38bdf8','Amide Formation':'4ade80','N-Alkylation & N-Arylation':'a78bfa','Sulfonamide Formation':'f472b6','Thiazole & Thiadiazole':'fb923c','Pyrazole & Triazole & Tetrazole':'facc15','Oxazole & Isoxazole & Oxadiazole':'34d399','Pyridine, Quinoline & Dihydropyridine':'60a5fa','Benzimidazole, Indole & Purine':'c084fc','Urea & Thiourea Formation':'f87171','Functional Group Interconversion':'94a3b8','Reductive Amination':'2dd4bf','Other':'475569'};
+    $('class-bars').innerHTML=Object.entries(cls).map(([k,v])=>{const c=colors[k]||'64748b';return`<div onclick="filterByClass('${k}')" class="cursor-pointer hover:opacity-80 transition-opacity"><div class="flex justify-between text-xs text-slate-400 mb-0.5"><span class="truncate" style="max-width:200px">${k}</span><span style="color:#${c}" class="ml-2 shrink-0">${v.toLocaleString()}</span></div><div class="h-1.5 rounded-full" style="background:#1e2a3a"><div class="h-full rounded-full" style="background:#${c};width:${Math.round((v/clsMax)*100)}%"></div></div></div>`;}).join('');
+  }
   if(y?.values){const mx=Math.max(...y.values,1);$('yield-chart').innerHTML=y.values.map((v,i)=>`<div class="flex-1 flex flex-col items-center gap-0.5"><div class="yield-bar" style="height:${Math.round((v/mx)*66)+2}px" title="${y.labels[i]}: ${v}"></div><p style="font-size:.5rem;color:#475569">${y.labels[i].split('-')[0]}</p></div>`).join('');}
 }
 
@@ -543,7 +600,8 @@ function pages(page,total,topId,botId,fn){
 }
 
 async function exportCSV(){
-  const d=await api('/api/export?q='+encodeURIComponent($('s-q').value.trim())+'&source='+document.querySelector('input[name=src]:checked').value);
+  const rc=encodeURIComponent($('s-class').value||'');
+  const d=await api('/api/export?q='+encodeURIComponent($('s-q').value.trim())+'&source='+document.querySelector('input[name=src]:checked').value+'&reaction_class='+rc);
   if(d.error)return;
   const blob=new Blob([d.csv],{type:'text/csv'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='reactions.csv';a.click();
@@ -552,8 +610,9 @@ async function exportCSV(){
 function cp(t){navigator.clipboard.writeText(t).then(()=>{const x=$('toast');x.style.display='block';setTimeout(()=>x.style.display='none',1600);}).catch(()=>{});}
 function esc(s){if(!s)return'';return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');}
 function $(id){return document.getElementById(id);}
-function resetSearch(){$('s-q').value='';document.querySelector('input[name=src][value=all]').checked=true;$('s-miny').value='';$('s-maxy').value='';$('s-conf').value=0;$('conf-val').textContent='0.0';$('s-solvent').value='';$('s-catalyst').value='';$('s-sort').value='confidence';doSearch(1);}
+function resetSearch(){$('s-q').value='';document.querySelector('input[name=src][value=all]').checked=true;$('s-miny').value='';$('s-maxy').value='';$('s-conf').value=0;$('conf-val').textContent='0.0';$('s-solvent').value='';$('s-catalyst').value='';$('s-class').value='';$('s-sort').value='confidence';doSearch(1);}
 function shutdown(){if(confirm('Close SynAgent?'))fetch(BASE+'/api/shutdown',{method:'POST'}).finally(()=>window.close());}
+function filterByClass(cls){switchTab('search',document.querySelector('.tab'));$('s-class').value=cls;doSearch(1);}
 
 api('/api/stats').then(s=>{if(s.db_path){$('db-badge').textContent=s.db_path;$('db-badge').classList.remove('hidden');}});
 doSearch(1);
@@ -623,6 +682,7 @@ class AppHandler(QWebEngineUrlSchemeHandler):
                 min_confidence=g("min_confidence", "0"),
                 solvent=unquote(g("solvent")),
                 catalyst=unquote(g("catalyst")),
+                reaction_class=unquote(g("reaction_class")),
                 sort=g("sort", "confidence"),
                 page=int(g("page", "1")),
                 page_size=int(g("page_size", "25")),
@@ -642,6 +702,7 @@ class AppHandler(QWebEngineUrlSchemeHandler):
                 source=g("source", "all"),
                 min_yield=float(g("min_yield")) if g("min_yield") else None,
                 min_confidence=g("min_confidence", "0"),
+                reaction_class=unquote(g("reaction_class")),
             )
             # Return as JSON with csv key so JS can blob-download it
             payload = json.dumps({"csv": csv_bytes.decode("utf-8", errors="replace")})
