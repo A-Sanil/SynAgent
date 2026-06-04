@@ -204,6 +204,79 @@ def serve(
         uvicorn.run(agent.to_web(), host=host, port=port)
 
 
+@app.command(name="check")
+def check(
+    file: Path,
+    output: Path | None = None,
+    verbose: bool = False,
+):
+    """Run MoleculeChecker on a .smi / .csv / .txt file (one SMILES per line).
+
+    Prints a pass/fail summary and optionally writes per-molecule results to CSV.
+    """
+    import csv
+    import json
+
+    from synagent.checker import check_batch
+
+    smiles_list: list[str] = []
+    suffix = file.suffix.lower()
+    with file.open("r", encoding="utf-8") as fh:
+        if suffix == ".csv":
+            reader = csv.DictReader(fh)
+            for row in reader:
+                smi = row.get("smiles") or row.get("SMILES") or next(iter(row.values()))
+                smiles_list.append(smi.strip())
+        else:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    smiles_list.append(line.split()[0])  # allow name in second column
+
+    if not smiles_list:
+        print("No SMILES found in input file.")
+        raise SystemExit(1)
+
+    print(f"Loaded {len(smiles_list)} molecules from {file}")
+    batch = check_batch(smiles_list)
+
+    print(f"\nResults: {batch['passed']}/{batch['total']} passed ({batch['pass_rate']:.1%})")
+    if batch["kill_reasons"]:
+        print("Kill reasons:")
+        for reason, count in sorted(batch["kill_reasons"].items(), key=lambda x: -x[1]):
+            print(f"  {reason:<35} {count}")
+
+    if verbose:
+        for r in batch["results"]:
+            status = "PASS" if r["pass"] else f"FAIL ({r['kill_reason']})"
+            print(f"  {r['smiles'][:60]:<62} {status}")
+
+    if output is not None:
+        rows = []
+        for r in batch["results"]:
+            row: dict = {
+                "smiles": r["smiles"],
+                "pass": r["pass"],
+                "kill_reason": r["kill_reason"] or "",
+            }
+            # Flatten a few key fields for easy inspection
+            if "charge" in r["checks"]:
+                row["formal_charge"] = r["checks"]["charge"].get("formal_charge", "")
+            if "sa_score" in r["checks"]:
+                row["sa_score"] = r["checks"]["sa_score"].get("sa_score", "")
+                row["sa_difficulty"] = r["checks"]["sa_score"].get("difficulty", "")
+            if "drug_likeness" in r["checks"]:
+                row["dl_violations"] = json.dumps(r["checks"]["drug_likeness"].get("violations", []))
+            if "salt_bridge" in r["checks"]:
+                row["has_salt_bridge"] = r["checks"]["salt_bridge"].get("has_salt_bridge_group", "")
+                row["salt_bridge_groups"] = json.dumps(r["checks"]["salt_bridge"].get("groups_found", []))
+            rows.append(row)
+
+        import polars as pl
+        pl.DataFrame(rows).write_csv(output)
+        print(f"\nFull results written to {output}")
+
+
 def main() -> None:
     app()
 
